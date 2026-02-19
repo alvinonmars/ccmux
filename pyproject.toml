@@ -1,0 +1,21 @@
+[project]
+name = "ccmux"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "libtmux",
+    "structlog",
+    "watchdog",
+    "mcp",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

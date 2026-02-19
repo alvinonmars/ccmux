@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Logs
+*.log
+
+# Claude Code project-level settings (machine-local, may contain absolute paths)
+.claude/
+
+# Spike result files (contain machine-specific paths and session IDs)
+tests/spikes/**/sp*_results.txt
+tests/spikes/**/*.jsonl
+tests/spikes/**/*.log
+
+# Runtime files
+/tmp/ccmux/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+# Discussion / scratch notes
+docs/discussion-log.md
