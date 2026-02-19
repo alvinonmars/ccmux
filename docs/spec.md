@@ -179,11 +179,15 @@ Adapters create their own FIFOs on startup; the daemon auto-discovers them via i
 ### Message Collection and Injection Flow
 
 ```
-Stop hook fires (Claude completes a turn)
-    → control.sock receives complete turn content
-    → broadcast to output.sock
-    → check: has terminal received input in the last N seconds? (pipe-pane -I)
-        yes → skip, wait for next stop hook
+Claude completes a turn
+    → claude binary calls ccmux/hook.py (stdin = Stop hook JSON with transcript_path)
+    → hook.py reads transcript_path, finds last assistant turn (message.role == "assistant")
+    → hook.py sends parsed turn to control.sock:
+        {"type": "broadcast", "session": "...", "turn": [...blocks...]}
+    → daemon receives on control.sock
+    → daemon broadcasts to all output.sock subscribers
+    → daemon checks: pipe-pane -I shows terminal input within last N seconds?
+        yes → skip injection, wait for next stop hook
         no  → drain all in.* FIFOs, format and inject all queued messages into Claude
 ```
 
@@ -231,7 +235,7 @@ Hook format (correct nested format, verified by SP-05):
 }
 ```
 
-Hook script path: `~/.local/share/ccmux/hook.py` (fixed path, no PID or random suffix).
+Hook script path: `<project_root>/ccmux/hook.py`. ccmux resolves its own absolute path at startup and writes it into `~/.claude/settings.json`.
 
 ### Claude Ready Detection
 
