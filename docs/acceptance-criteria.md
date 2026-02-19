@@ -24,16 +24,22 @@ Located at `tests/helpers/mock_claude.py`. Replaces real Claude Code in integrat
 | `MOCK_TRANSCRIPT` | `""` | Transcript file path — if set, appends a valid JSONL line after each reply |
 | `MOCK_HOOK_SCRIPT` | `""` | Hook script path — if set, calls it after each reply with Stop hook JSON on stdin |
 | `MOCK_SPINNER` | `0` | If > 0, emits N spinner sequences (`\x1b[?2026l\x1b[?2026h✻`, 0.1s apart) before replying |
-| `MOCK_PERMISSION_INTERVAL` | `0` | If > 0, outputs a permission prompt (`Allow this action? Yes/No`) every N turns, then pauses |
+| `MOCK_CONTINUOUS_SPINNER` | `0` | If > 0, emits spinner sequences indefinitely (one per 0.1s) until stdin receives input; overrides `MOCK_SPINNER` |
+| `MOCK_PERMISSION_INTERVAL` | `0` | If > 0, every N turns: output permission prompt text (`Allow this action? Yes/No`), call hook with PermissionRequest JSON, then pause waiting for stdin |
 
 **Behavior loop**:
 1. On start: output `$MOCK_PROMPT`
 2. On stdin input: wait `$MOCK_DELAY` seconds
-3. If `MOCK_SPINNER > 0`: emit N spinner sequences
-4. Output `$MOCK_REPLY`
-5. If `MOCK_TRANSCRIPT` is set: append one JSONL line to the file
-6. If `MOCK_HOOK_SCRIPT` is set: call the hook script (Stop hook JSON on stdin, including `transcript_path`)
-7. Output `$MOCK_PROMPT` again; go to step 2
+3. If `MOCK_CONTINUOUS_SPINNER > 0`: emit spinner sequences every 0.1s until next stdin arrives (loops back to step 2)
+4. Else if `MOCK_SPINNER > 0`: emit N spinner sequences (0.1s apart)
+5. If this is turn N and `MOCK_PERMISSION_INTERVAL > 0` and `N % MOCK_PERMISSION_INTERVAL == 0`:
+   - Output `Allow this action? Yes/No`
+   - If `MOCK_HOOK_SCRIPT` is set: call hook script with PermissionRequest JSON on stdin
+   - Wait for next stdin (the "resolution"); then continue
+6. Output `$MOCK_REPLY`
+7. If `MOCK_TRANSCRIPT` is set: append one JSONL line to the file
+8. If `MOCK_HOOK_SCRIPT` is set: call the hook script with Stop hook JSON on stdin (including `transcript_path`, `session_id`)
+9. Output `$MOCK_PROMPT` again; go to step 2
 
 **Transcript JSONL line format**:
 ```json
@@ -194,7 +200,7 @@ Located in `tests/spikes/`. Each spike is an independently runnable program. All
 | T-05-1 | Normal prompt | `MOCK_PROMPT=❯ `, no spinner | Ready event fires within 3.2s of silence; capture-pane last line contains `❯` |
 | T-05-2 | Silence timeout fallback | Reply without outputting prompt; remain silent | Daemon fires ready event after 3s silence (±200ms) |
 | T-05-3 | Permission prompt | `MOCK_PERMISSION_INTERVAL=2`; outputs `Allow this action? Yes/No` | Ready event does not fire; daemon logs `permission_prompt` state; no injection |
-| T-05-4 | Generating | `MOCK_SPINNER=10`; emits spinner sequences continuously | Ready event does not fire |
+| T-05-4 | Generating | `MOCK_CONTINUOUS_SPINNER=1`; emits spinner sequences indefinitely until input received | Ready event does not fire while spinner is active; ready fires only after spinner stops and 3s silence elapses |
 | T-05-5 | Silence timeout configurable | Set timeout to 1s | Daemon fires ready event after 1s (±200ms) |
 
 ---

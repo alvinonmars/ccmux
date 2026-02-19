@@ -257,7 +257,22 @@ Detection mechanism (verified by SP-02):
 
 The ccmux daemon runs as an MCP server, ready before Claude Code starts. See the Startup Sequence section for ordering.
 
-When Claude Code crashes and restarts, the MCP server remains running and Claude Code reconnects by re-reading its config.
+**Transport**: SSE over HTTP (not stdio). The MCP server runs independently at a fixed address so it survives Claude Code restarts. Claude Code reconnects by re-reading its config on each restart.
+
+**Address**: `http://127.0.0.1:<CCMUX_MCP_PORT>` (default port: `9876`)
+
+**Claude Code config**: written to `~/.claude.json` under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "ccmux": {
+      "type": "sse",
+      "url": "http://127.0.0.1:9876/sse"
+    }
+  }
+}
+```
 
 Provided tool:
 
@@ -339,6 +354,24 @@ For use by the stop hook script only. Format:
 ```json
 {"type": "broadcast", "session": "abc123", "turn": [...]}
 ```
+
+---
+
+## Configuration Parameters
+
+All parameters have defaults; none are required. Override via environment variable or config file.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `CCMUX_RUNTIME_DIR` | `/tmp/ccmux` | Directory for FIFOs and sockets |
+| `CCMUX_TMUX_SESSION` | `ccmux` | tmux session name managed by ccmux |
+| `CCMUX_IDLE_THRESHOLD` | `30` | Seconds of terminal inactivity before injection is allowed |
+| `CCMUX_SILENCE_TIMEOUT` | `3` | Seconds of stdout silence before Claude is considered ready |
+| `CCMUX_MCP_PORT` | `9876` | HTTP port for the MCP SSE server |
+| `CCMUX_BACKOFF_INITIAL` | `1` | Initial backoff seconds on crash |
+| `CCMUX_BACKOFF_CAP` | `60` | Maximum backoff seconds |
+| `CCMUX_HOOK_SCRIPT` | `~/.local/share/ccmux/hook.py` | Path to the installed hook script |
+| `CCMUX_LOG_FILE` | `~/.local/share/ccmux/ccmux.log` | Structured log output path |
 
 ---
 
