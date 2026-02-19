@@ -2,49 +2,76 @@
 
 ## Test Strategy
 
-| Layer | Scope | Dependencies | How to run |
-|-------|-------|-------------|------------|
-| **Unit** | Individual functions/classes, protocol parsing, state machines | Pure mocks | `pytest tests/unit/` |
-| **Integration** | Full core-layer flows | tmux + Mock Claude | `pytest tests/integration/` |
-| **Spike** | One-time validation of real Claude Code behavior | Real Claude Code | Run manually; findings written into spec.md |
+| Layer | Scope | Fixture needed | How to run |
+|-------|-------|---------------|------------|
+| **Unit** | Protocol parsing, state machines, individual functions | None (pure Python) | `pytest tests/unit/` |
+| **Integration — no pane** | FIFO I/O, inotify, pubsub, MCP tool, logging, shutdown | daemon only | `pytest tests/integration/` |
+| **Integration — bare pane** | tmux injection, terminal activity detection | daemon + `cat` in pane | `pytest tests/integration/` |
+| **Integration — mock pane** | Ready detection, full broadcast chain, restart recovery | daemon + `mock_pane.py` | `pytest tests/integration/` |
+| **E2E smoke** | Real Claude Code end-to-end | real `claude` binary | Manual only |
 
-The automated iteration loop depends on Unit + Integration tests. Spike findings are frozen as config parameters and never re-run.
+The automated iteration loop covers Unit + Integration. E2E smoke is run manually before releases to verify the real Claude Code integration.
 
-### Mock Claude Process Specification
+**Test fixture tiers** (defined in `tests/conftest.py`):
 
-Located at `tests/helpers/mock_claude.py`. Replaces real Claude Code in integration tests.
+- `daemon` — starts ccmux daemon with test config (`ccmux-test-{pid}` session name, ephemeral port)
+- `bare_pane` — tmux pane running `cat`; sufficient for injection and terminal activity tests
+- `mock_pane` — tmux pane running `mock_pane.py`; required for stdout-pattern and hook-chain tests
+- `fire_hook(event, data)` — helper that directly calls `ccmux/hook.py` with crafted JSON; decouples hook-firing from the pane process where not needed
+
+### mock_pane Process Specification
+
+Located at `tests/helpers/mock_pane.py`. A **configurable I/O process** that runs inside a tmux pane and produces the I/O patterns that real Claude Code would produce. It does not simulate Claude's intelligence — only its observable I/O behavior as established by the spikes.
 
 **Environment variables**:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MOCK_PROMPT` | `❯ ` | Prompt string output when waiting for input |
-| `MOCK_REPLY` | `mock reply` | Reply content for each turn (supports `\n` escapes) |
+| `MOCK_PROMPT` | `❯ ` | Prompt string output when waiting for input (ready state) |
+| `MOCK_REPLY` | `mock reply` | Reply text output each turn |
 | `MOCK_DELAY` | `0.1` | Seconds between receiving input and outputting reply |
-| `MOCK_TRANSCRIPT` | `""` | Transcript file path — if set, appends a valid JSONL line after each reply |
-| `MOCK_HOOK_SCRIPT` | `""` | Hook script path — if set, calls it after each reply with Stop hook JSON on stdin |
-| `MOCK_SPINNER` | `0` | If > 0, emits N spinner sequences (`\x1b[?2026l\x1b[?2026h✻`, 0.1s apart) before replying |
-| `MOCK_CONTINUOUS_SPINNER` | `0` | If > 0, emits spinner sequences indefinitely (one per 0.1s) until stdin receives input; overrides `MOCK_SPINNER` |
-| `MOCK_PERMISSION_INTERVAL` | `0` | If > 0, every N turns: output permission prompt text (`Allow this action? Yes/No`), call hook with PermissionRequest JSON, then pause waiting for stdin |
+| `MOCK_TRANSCRIPT` | `""` | Transcript file path; if set, appends a valid JSONL line after each reply |
+| `MOCK_HOOK_SCRIPT` | `""` | Hook script path; if set, called after each reply with Stop hook JSON on stdin |
+| `MOCK_SPINNER` | `0` | If > 0, emits N spinner sequences (`\x1b[?2026l\x1b[?2026h✻`, 0.1s apart) before reply |
+| `MOCK_CONTINUOUS_SPINNER` | `0` | If > 0, emits spinner sequences every 0.1s indefinitely until next stdin arrives; overrides `MOCK_SPINNER` |
+| `MOCK_PERMISSION_INTERVAL` | `0` | If > 0, every N turns: output permission prompt text, call hook with PermissionRequest JSON, pause for stdin |
 
 **Behavior loop**:
 1. On start: output `$MOCK_PROMPT`
 2. On stdin input: wait `$MOCK_DELAY` seconds
-3. If `MOCK_CONTINUOUS_SPINNER > 0`: emit spinner sequences every 0.1s until next stdin arrives (loops back to step 2)
+3. If `MOCK_CONTINUOUS_SPINNER > 0`: emit spinner sequences every 0.1s until next stdin arrives, then go to step 2
 4. Else if `MOCK_SPINNER > 0`: emit N spinner sequences (0.1s apart)
-5. If this is turn N and `MOCK_PERMISSION_INTERVAL > 0` and `N % MOCK_PERMISSION_INTERVAL == 0`:
+5. If this is a permission turn (`MOCK_PERMISSION_INTERVAL > 0` and `turn % interval == 0`):
    - Output `Allow this action? Yes/No`
-   - If `MOCK_HOOK_SCRIPT` is set: call hook script with PermissionRequest JSON on stdin
-   - Wait for next stdin (the "resolution"); then continue
+   - If `MOCK_HOOK_SCRIPT` set: call hook script with `{"hook_event_name": "PermissionRequest", ...}` on stdin
+   - Wait for next stdin (simulates human resolving the prompt); then continue
 6. Output `$MOCK_REPLY`
-7. If `MOCK_TRANSCRIPT` is set: append one JSONL line to the file
-8. If `MOCK_HOOK_SCRIPT` is set: call the hook script with Stop hook JSON on stdin (including `transcript_path`, `session_id`)
+7. If `MOCK_TRANSCRIPT` set: append one JSONL line to the file
+8. If `MOCK_HOOK_SCRIPT` set: call hook script with Stop hook JSON on stdin (includes `transcript_path`, `session_id`)
 9. Output `$MOCK_PROMPT` again; go to step 2
 
-**Transcript JSONL line format**:
+**Transcript JSONL line format** (matches SP-01 verified format):
 ```json
 {"message": {"role": "assistant", "content": [{"type": "text", "text": "$MOCK_REPLY"}]}, "ts": 1740000000}
 ```
+
+**Which tests use which fixture**:
+
+| AC | Fixture | Reason |
+|----|---------|--------|
+| AC-01 (FIFO accept) | `daemon` only | Write to FIFO, check daemon log |
+| AC-02 (inotify) | `daemon` only | Create/delete FIFOs, check log |
+| AC-03 (injection) | `bare_pane` + `fire_hook` | Verify injected text appears in pane |
+| AC-04 (terminal activity) | `bare_pane` | Simulate keyboard input via send-keys |
+| AC-05 (ready detection) | `mock_pane` | Need controllable stdout patterns |
+| AC-06 (broadcast) | `mock_pane` | Hook must fire to trigger broadcast |
+| AC-07 (broadcast format) | `mock_pane` + `fire_hook` | Can use crafted transcript for format tests |
+| AC-08 (MCP tool) | `daemon` only | Call tool handler directly |
+| AC-09 (crash recovery) | `bare_pane` | Kill and restart the pane process |
+| AC-10 (logging) | mixed | Inspect log output from above tests |
+| AC-11 (graceful shutdown) | `daemon` only | Send SIGTERM, check exit |
+| AC-12 (daemon restart) | `mock_pane` | Needs hook chain to verify resumption |
+| AC-13 (permission routing) | `mock_pane` | Needs permission prompt output + hook |
 
 ---
 

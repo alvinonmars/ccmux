@@ -1,0 +1,27 @@
+# ccmux configuration
+# All values shown are defaults. Override as needed for your deployment.
+# This file is safe to commit — it contains no secrets or machine-specific paths.
+
+[project]
+# Used to form the tmux session name: ccmux-{name}
+# Defaults to the basename of the working directory if not set.
+name = "claude-code-hub"
+
+[runtime]
+# Directory for FIFOs and Unix sockets. Created on startup if absent.
+dir           = "/tmp/ccmux"
+
+[timing]
+# Seconds of terminal inactivity required before auto-injection is allowed.
+idle_threshold   = 30
+# Seconds of stdout silence that signal Claude is ready for input.
+silence_timeout  = 3
+
+[mcp]
+# Port for the MCP SSE server. Binds to 127.0.0.1 only (loopback, not exposed to network).
+port = 9876
+
+[recovery]
+# Exponential backoff parameters for Claude process crash recovery.
+backoff_initial = 1    # seconds before first restart attempt
+backoff_cap     = 60   # maximum seconds between restart attempts

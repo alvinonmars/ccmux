@@ -259,7 +259,7 @@ The ccmux daemon runs as an MCP server, ready before Claude Code starts. See the
 
 **Transport**: SSE over HTTP (not stdio). The MCP server runs independently at a fixed address so it survives Claude Code restarts. Claude Code reconnects by re-reading its config on each restart.
 
-**Address**: `http://127.0.0.1:<CCMUX_MCP_PORT>` (default port: `9876`)
+**Address**: `http://127.0.0.1:<port>` (default port: `9876`). Binds to loopback only — never reachable from the network. HTTPS is unnecessary for loopback traffic and would add certificate management complexity with no real security benefit.
 
 **Claude Code config**: written to `~/.claude.json` under `mcpServers`:
 
@@ -357,21 +357,33 @@ For use by the stop hook script only. Format:
 
 ---
 
-## Configuration Parameters
+## Configuration
 
-All parameters have defaults; none are required. Override via environment variable or config file.
+Configuration is read from `ccmux.toml` in the working directory (the project root). All values have defaults; the file is safe to commit — it contains no secrets or machine-specific paths.
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `CCMUX_RUNTIME_DIR` | `/tmp/ccmux` | Directory for FIFOs and sockets |
-| `CCMUX_TMUX_SESSION` | `ccmux` | tmux session name managed by ccmux |
-| `CCMUX_IDLE_THRESHOLD` | `30` | Seconds of terminal inactivity before injection is allowed |
-| `CCMUX_SILENCE_TIMEOUT` | `3` | Seconds of stdout silence before Claude is considered ready |
-| `CCMUX_MCP_PORT` | `9876` | HTTP port for the MCP SSE server |
-| `CCMUX_BACKOFF_INITIAL` | `1` | Initial backoff seconds on crash |
-| `CCMUX_BACKOFF_CAP` | `60` | Maximum backoff seconds |
-| `CCMUX_HOOK_SCRIPT` | `~/.local/share/ccmux/hook.py` | Path to the installed hook script |
-| `CCMUX_LOG_FILE` | `~/.local/share/ccmux/ccmux.log` | Structured log output path |
+```toml
+[project]
+name = "my-project"      # forms tmux session name: ccmux-{name}
+                         # defaults to basename of CWD if omitted
+
+[runtime]
+dir = "/tmp/ccmux"       # FIFOs and sockets directory
+
+[timing]
+idle_threshold  = 30     # seconds of terminal inactivity before injection allowed
+silence_timeout = 3      # seconds of stdout silence = Claude ready
+
+[mcp]
+port = 9876              # MCP SSE server port (binds to 127.0.0.1 only)
+
+[recovery]
+backoff_initial = 1      # seconds before first restart attempt
+backoff_cap     = 60     # maximum seconds between restart attempts
+```
+
+**tmux session name**: `ccmux-{project.name}`. Multiple ccmux instances for different projects co-exist without collision.
+
+**Hook script path**: `<project_root>/ccmux/hook.py`. On startup, ccmux writes the resolved absolute path of this file into `~/.claude/settings.json`. The script itself lives in the project and is committed; only the path reference in settings.json is machine-specific.
 
 ---
 
