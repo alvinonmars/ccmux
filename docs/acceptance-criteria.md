@@ -11,6 +11,21 @@
 
 **Automated iteration loop**: Unit + Integration/mock. These run fast (no AI latency) and require no subscription.
 
+### Iteration Closure Protocol
+
+Before marking any iteration complete:
+
+1. Run **parallel multi-round closure checking** using an agent team. Agent count is determined by the complexity of the iteration, not fixed.
+2. Agents run with **bypassPermissions** so they can execute tests, read code, and verify behavior directly.
+3. Fix every issue found. Repeat until **2 consecutive rounds find zero new issues**.
+4. Only then mark the iteration complete.
+
+**Checking angles** (assign one or more per agent based on scope):
+
+- **Spec → Implementation**: Every AC sentence has matching code. Claims not tested are moved to the right AC or explicitly excluded.
+- **Tests → Spec**: Tests cover all cases, edge cases, error paths, boundary conditions. Assertions are genuine (not trivially true, e.g. 0==0). Run the actual tests.
+- **Integration**: Outputs interact correctly with adjacent components. Gaps are in Known Issues. Empirical behavior matches documented claims.
+
 **Integration/real tests** are marked `@pytest.mark.real_claude` and skipped by default. Run locally before any significant change to Claude Code integration points. Require: claude binary in PATH, HTTP proxy configured, Claude Max auth active. Each test takes 15–30s (one real Claude turn).
 
 **Behaviors that REQUIRE real Claude Code** (cannot be substituted by mock_pane):
@@ -77,18 +92,20 @@ Located at `tests/helpers/mock_pane.py`. A **configurable I/O process** that run
 | AC-02 (inotify) | Integration/mock | `daemon` only |
 | AC-03 (injection) | Integration/mock | `bare_pane` + `fire_hook` |
 | AC-04 (terminal activity) | Integration/mock | `bare_pane` |
-| AC-05 (ready detection) | Integration/mock | `mock_pane` |
+| AC-05 (ready detection) | Integration/mock | `mock_pane` (T-05-1/2/4/5/6); `bare_pane` (T-05-3) |
 | AC-06 T-06-1/2/3/4 | Integration/mock | `fire_hook` → output.sock |
-| AC-06 (real hook fires) | Integration/**real** | real `claude` turn |
+| AC-06 T-06-real (full pipeline) | Integration/mock | `net_daemon` + `fire_hook` (hook.py subprocess → control.sock → output.sock) |
 | AC-07 T-07-1/4 | Integration/mock | `fire_hook` with crafted transcript |
 | AC-07 T-07-2/3 (tool_use, thinking) | Integration/**real** | real `claude` turn |
 | AC-08 (MCP tool) | Integration/**real** | real `claude` calls tool |
-| AC-09 (crash recovery) | Integration/mock | `bare_pane` (kill it) |
+| AC-09 (crash recovery) | Integration/mock | `_FakePane` (monkeypatched `_is_claude_running`; real process detection untested) |
 | AC-10 (logging) | Integration/mock | asserts on log from above tests |
 | AC-11 (graceful shutdown) | Integration/mock | `daemon` only |
 | AC-12 (daemon restart) | Integration/mock | `mock_pane` |
-| AC-13 T-13-1/3 (PermissionRequest hook) | Integration/**real** | real `claude` |
-| AC-13 T-13-2 (capture-pane fallback) | Integration/mock | `mock_pane` |
+| AC-13 T-13-1 (PermissionRequest hook + alert) | Integration/mock | `net_daemon` + `fire_hook("PermissionRequest")` + output.sock subscriber |
+| AC-13 T-13-2 (capture-pane fallback) | Integration/mock | `bare_pane` (typed permission text, no MOCK_HOOK_SCRIPT) |
+| AC-13 T-13-3 (injection resumes) | Integration/mock | `net_daemon` + `fire_hook("PermissionRequest")` + `fire_hook("Stop")` + `bare_pane` |
+| AC-13 T-13-4 (capture-pane recovery) | Integration/mock | `bare_pane` (no permission text) + `_permission_detected=True` |
 
 ---
 
@@ -223,15 +240,21 @@ Located in `tests/spikes/`. Each spike is an independently runnable program. All
 
 ---
 
-### AC-04 Terminal Activity Detection (pipe-pane)
+### AC-04 Terminal Activity Detection
 
-**Criterion**: After `pipe-pane -I` detects keyboard input, the daemon updates `last_terminal_input_time` and suppresses injection.
+**Criterion**: Daemon reads `#{client_activity}` from tmux. When a human has used the terminal within `idle_threshold` seconds, injection is suppressed. Daemon injections via `send-keys` do not count as activity.
+
+**Note**: `pipe-pane -I` is NOT used — it captures all PTY stdin including daemon's own send-keys injections, creating a circular dependency. `#{client_activity}` only tracks actual tmux client keyboard events.
 
 | ID | Scenario | Action | Expected result |
 |----|----------|--------|----------------|
-| T-04-1 | Suppress injection when terminal active | Simulate keyboard input via send-keys; immediately trigger stop hook | Queued FIFO messages are not injected |
-| T-04-2 | Resume injection after terminal idle | Wait longer than N seconds; trigger stop hook | Queued messages are injected normally |
-| T-04-3 | Idle threshold configurable | Set threshold to 5s | Injection resumes after 5s; timing error ≤ 1s |
+| T-04-0a | `#{client_activity}` readable | Call `_get_client_activity_ts()` on real tmux pane | Returns int ≥ 0; never raises |
+| T-04-0a2 | `_get_client_activity_ts()` fail-safe | Simulate pane cmd() raising; call `_get_client_activity_ts()` | Returns 0; `_is_terminal_active()` returns False (injection allowed) |
+| T-04-0b | `send-keys` does not advance `#{client_activity}` | Inject text via `send-keys`; read `#{client_activity}` before and after | Timestamp unchanged — daemon injections are not human activity |
+| T-04-1 | Suppress injection when terminal active | `_get_client_activity_ts()` returns current time; trigger `_maybe_inject()` with bare_pane set | Messages remain in queue (pane=None ruled out as cause) |
+| T-04-2 | Resume injection after terminal idle | `_get_client_activity_ts()` returns 0; trigger `_maybe_inject()` | Messages injected; text visible in pane |
+| T-04-3 | Idle threshold configurable | Set threshold to 5s; check boundary at 4s and 6s | 4s ago → active; 6s ago → idle |
+| T-04-4 | Active → suppress → idle → inject sequence | Phase 1: active; Phase 2: idle | Messages suppressed in phase 1, drained and visible in pane in phase 2 |
 
 ---
 
@@ -241,11 +264,12 @@ Located in `tests/spikes/`. Each spike is an independently runnable program. All
 
 | ID | Scenario | Mock Claude behavior | Expected result |
 |----|----------|---------------------|----------------|
-| T-05-1 | Normal prompt | `MOCK_PROMPT=❯ `, no spinner | Ready event fires within 3.2s of silence; capture-pane last line contains `❯` |
-| T-05-2 | Silence timeout fallback | Reply without outputting prompt; remain silent | Daemon fires ready event after 3s silence (±200ms) |
-| T-05-3 | Permission prompt | `MOCK_PERMISSION_INTERVAL=2`; outputs `Allow this action? Yes/No` | Ready event does not fire; daemon logs `permission_prompt` state; no injection |
-| T-05-4 | Generating | `MOCK_CONTINUOUS_SPINNER=1`; emits spinner sequences indefinitely until input received | Ready event does not fire while spinner is active; ready fires only after spinner stops and 3s silence elapses |
-| T-05-5 | Silence timeout configurable | Set timeout to 1s | Daemon fires ready event after 1s (±200ms) |
+| T-05-1 | Normal prompt | default `MOCK_PROMPT=❯ `, no spinner; silence_timeout=1.0s | StdoutMonitor fires on_ready after silence; capture-pane last line contains `❯` → State.READY |
+| T-05-2 | Silence timeout fallback | `MOCK_PROMPT=""` (no prompt); silence_timeout=1.0s | StdoutMonitor fires on_ready; capture-pane has no ❯ or spinner → State.UNKNOWN |
+| T-05-3 | Permission prompt | `MOCK_PERMISSION_INTERVAL=1`; first turn outputs `Allow this action? Yes/No` | capture-pane keyword match → State.PERMISSION; injection suppressed |
+| T-05-4 | Generating | `MOCK_SPINNER=15` (15 × 0.1s = 1.5s spinner burst); input "go" sent | At 0.5s: spinner chars on last capture-pane line → State.GENERATING; at 2.2s: prompt visible → State.READY |
+| T-05-5 | Silence timeout configurable | silence_timeout=2.0s; write log once, no further writes | Not fired at 1.8s; fires exactly once at ≥2.0s |
+| T-05-6 | reset() restarts silence timer | silence_timeout=1.0s; fire once; call reset(); no new file writes | on_ready fires a second time after reset() + silence_timeout |
 
 ---
 
@@ -354,9 +378,10 @@ Located in `tests/spikes/`. Each spike is an independently runnable program. All
 
 | ID | Scenario | Action | Expected result |
 |----|----------|--------|----------------|
-| T-13-1 | PermissionRequest hook fires | Mock Claude emits permission prompt (`MOCK_PERMISSION_INTERVAL=1`) | Daemon receives PermissionRequest hook; stops automatic injection |
+| T-13-1 | PermissionRequest hook fires | Mock Claude emits permission prompt (`MOCK_PERMISSION_INTERVAL=1`) | Daemon receives PermissionRequest hook; stops automatic injection; broadcasts `permission_request` alert to output.sock subscribers |
 | T-13-2 | capture-pane fallback detection | Hook does not fire but capture-pane finds permission keywords | Daemon still stops injection; logs detection source as `capture-pane` |
 | T-13-3 | Injection resumes after permission resolved | Human resolves the permission prompt; claude returns to ready | Daemon detects ready state; resumes automatic injection |
+| T-13-4 | capture-pane recovery clears stale flag | `_permission_detected` set by hook, but capture-pane shows no permission text (user resolved without Stop hook) | Flag cleared; queued messages injected |
 
 ---
 
@@ -370,7 +395,56 @@ Located in `tests/spikes/`. Each spike is an independently runnable program. All
 ## Test Commands
 
 ```bash
-pytest tests/unit/        -v                    # no external dependencies
-pytest tests/integration/ -v                    # requires tmux
-pytest tests/             --cov=ccmux --cov-report=term-missing
+# Mock tests only (no proxy needed; runs in CI)
+.venv/bin/python -m pytest tests/ -m "not real_claude" -v
+
+# real_claude tests (requires proxy running on port 8118)
+# Proxy check is automatic — tests skip cleanly if proxy is down
+.venv/bin/python -m pytest tests/ -m real_claude -v
+
+# All tests
+.venv/bin/python -m pytest tests/ -v
+
+# Coverage
+.venv/bin/python -m pytest tests/ --cov=ccmux --cov-report=term-missing
 ```
+
+**real_claude tests** use the `real_claude_proxy` fixture which:
+- Checks `http://127.0.0.1:8118` proxy availability via curl
+- Sets `test_config.claude_proxy` (NOT `os.environ`) — only the `claude` process in the tmux pane uses the proxy via `_proxy_env_prefix(cfg)` inline in `send_keys`; the test process and all other subprocesses are unaffected
+- Skips cleanly (not fails) if proxy is down — safe to include in any test run
+
+---
+
+## Iteration Status
+
+_This section is the single source of truth for development progress. Update it at the end of each iteration. New sessions should read this before starting any work._
+
+### Completed
+
+| Iteration | Scope | Tests | Notes |
+|-----------|-------|-------|-------|
+| Iter-0 | Core infrastructure: pubsub, hook, hooks_manager, injector, fifo, watcher, detector, lifecycle, mcp_server, daemon | 53 tests passing (AC-01✅ AC-03✅ AC-06✅ AC-07 partial AC-11 partial) | Baseline implementation |
+| Iter-1 | AC-04: Terminal activity detection via `#{client_activity}` | 60 tests passing (+7) | Removed pipe-pane -I and dead code; verified design premise (T-04-0a/0a2/0b); empirically confirmed server-wide scope; 3 closure rounds, 2 consecutive clean |
+| Iter-2 | AC-05: Ready detection (StdoutMonitor + ReadyDetector GENERATING fix) | 66 tests passing (+6) | Fixed dead `_check_generating()` call in `get_state()`; fixed `reset()` not clearing `_last_mtime`; added `make_mock_pane` factory fixture; T-05-1~6 all pass |
+| Iter-3 | AC-02: Output FIFO channel write (T-02-3/T-02-4) | 68 tests passing (+2) | Extracted `_send_to_channel` coroutine from MCP closure (testable); wired `on_output_add/remove` callbacks in daemon; T-02-3 verifies FIFO write end-to-end; T-02-4 verifies error return + warning logged |
+| Iter-4 | AC-09: Crash recovery (T-09-1~4) | 70 tests passing (+2) | Added poll_interval param to LifecycleManager (testable); fixed restart cmd (always CLAUDE_CONTINUE_CMD); T-09-1 verifies crash detection timing + log; T-09-2 verifies correct restart cmd; T-09-3 lower+upper bound on backoff intervals; T-09-4 cap verified via mocked asyncio.sleep |
+| Iter-5 | AC-13 (PermissionRequest routing) + AC-06 real pipeline | 75 tests passing (+5) | Fixed `_check_permission_prompt` false positive (last 5 lines + ❯-at-end guard); fixed `_permission_detected` sticky flag (cleared in `_on_broadcast` on Stop hook); fixed daemon.py `log.info("hook event received", event=event)` structlog keyword conflict (renamed to `hook_event=event`); T-13-1/3: fire_hook + bare_pane; T-13-2: bare_pane typed text; T-06-real: hook.py→control.sock→output.sock pipeline. **Post-review fixes**: (1) MCP startup race resolved — `run_server()` signals `asyncio.Event` after port bind, daemon awaits before `_write_mcp_config()`; (2) AC-13 alert broadcast — permission_request event sent to output.sock subscribers (T-13-1 verifies); (3) capture-pane recovery — stale `_permission_detected` flag cleared when capture-pane no longer shows permission text (T-13-4) |
+
+### Pending
+
+_Each iteration is complete only when both its mock and real_claude tests pass. real_claude tests run manually at each iteration milestone (marked `@pytest.mark.real_claude`, skipped in CI)._
+
+| # | AC | Mock tests | real_claude tests | Blocker |
+|---|----|-----------|--------------------|---------|
+| 6 | AC-07 complete | T-07-1, T-07-4 (already passing) | T-07-2: thinking blocks; T-07-3: tool_use blocks | After Iter-5 |
+| 7 | AC-08 | — | T-08-1~3: Claude calls send_to_channel MCP tool | After Iter-6 |
+| 8 | AC-10 | T-10-1~3: structured log assertions reusing fixtures from above | — | After Iter-7 |
+| 9 | AC-00 + AC-11 + AC-12 | T-00-2~4, T-11-2/3, T-12-1~4 | T-00-1: fresh start with real claude | After Iter-8 |
+
+### Known Issues (carry-forward)
+
+| File | Issue | Affects |
+|------|-------|---------|
+| `ccmux/lifecycle.py:_is_claude_running` | Process detection logic (pgrep + capture-pane fallback) is never exercised by tests; all AC-09 tests monkeypatch this method. Also: after restart, monitor resumes polling immediately — correct behavior relies on pgrep finding the new claude process within `poll_interval` seconds (typically safe, but untested). Real coverage requires `bare_pane` + actual process kill. | AC-09 |
+| `mock_pane.py` PTY stdin behavior | `mock_pane`'s `sys.stdin.readline()` for the permission-resolution wait returns immediately (empty string) in a PTY context — the turn completes before the test can sample the permission state. AC-13 T-13-1/2/3/4 worked around this by using `fire_hook` + `bare_pane` instead. If mock_pane is ever needed for permission-state tests, use `MOCK_PERMISSION_DURATION` env var (not yet implemented) to sleep instead of readline. | AC-13 |

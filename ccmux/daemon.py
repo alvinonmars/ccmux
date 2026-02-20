@@ -53,10 +53,12 @@ def _configure_logging(runtime_dir: Path) -> None:
 class Daemon:
     """The ccmux daemon orchestrates all components."""
 
-    def __init__(self, cfg: Config) -> None:
+    def __init__(
+        self, cfg: Config, mcp_ready: Optional[asyncio.Event] = None
+    ) -> None:
         self.cfg = cfg
+        self._mcp_ready = mcp_ready
         self._message_queue: list[Message] = []
-        self._last_terminal_input: float = 0.0
         self._permission_detected: bool = False
         self._current_session_id: Optional[str] = None
         self._pane: Optional[libtmux.Pane] = None
@@ -85,6 +87,10 @@ class Daemon:
         install_hooks(self.cfg)
         log.info("hooks installed", hook_script=str(self.cfg.hook_script))
 
+        # Wait for MCP server to bind its port before advertising the URL.
+        if self._mcp_ready is not None:
+            await self._mcp_ready.wait()
+
         _write_mcp_config(self.cfg)
         log.info("MCP config written", url=self.cfg.mcp_url)
 
@@ -110,6 +116,8 @@ class Daemon:
             loop,
             on_input_add=self._on_fifo_add,
             on_input_remove=self._on_fifo_remove,
+            on_output_add=self._on_output_fifo_add,
+            on_output_remove=self._on_output_fifo_remove,
         )
         self._watcher.start()
         self._watcher.scan_existing()
@@ -177,17 +185,13 @@ class Daemon:
 
         if session is None:
             log.info("creating new tmux session", session=self.cfg.tmux_session)
-            env = {
-                **os.environ,
-                "CCMUX_CONTROL_SOCK": str(self.cfg.control_sock),
-            }
             session = server.new_session(
                 session_name=self.cfg.tmux_session,
                 window_name="claude",
             )
             pane = session.active_window.active_pane
             pane.send_keys(
-                f"CCMUX_CONTROL_SOCK={self.cfg.control_sock} "
+                f"{_proxy_env_prefix(self.cfg)}CCMUX_CONTROL_SOCK={self.cfg.control_sock} "
                 f"claude --dangerously-skip-permissions",
                 enter=True,
             )
@@ -198,7 +202,7 @@ class Daemon:
         self._pane = session.active_window.active_pane
         await asyncio.sleep(0.5)  # let pane initialize
 
-        # Mount pipe-pane for stdout/stdin monitoring
+        # Mount pipe-pane for stdout monitoring
         self._mount_pipe_pane()
 
         # Detect current state
@@ -218,22 +222,12 @@ class Daemon:
             self._lifecycle.start()
 
     def _mount_pipe_pane(self) -> None:
-        """Mount pipe-pane -O/-I for stdout/stdin monitoring."""
+        """Mount pipe-pane -O for stdout monitoring."""
         if self._pane is None:
             return
         stdout_log = self.cfg.stdout_log
-        stdin_log = self.cfg.stdin_log
         try:
-            self._pane.cmd(
-                "pipe-pane",
-                "-O",
-                f"cat >> {stdout_log}",
-            )
-            self._pane.cmd(
-                "pipe-pane",
-                "-I",
-                f"cat >> {stdin_log}",
-            )
+            self._pane.cmd("pipe-pane", "-O", f"cat >> {stdout_log}")
         except Exception as e:
             log.warning("pipe-pane failed", error=str(e))
 
@@ -249,6 +243,11 @@ class Daemon:
         self._current_session_id = session
 
         log.info("stop hook received", session=session)
+
+        # A completed turn means any outstanding permission prompt was resolved.
+        if self._permission_detected:
+            self._permission_detected = False
+            log.info("permission prompt resolved via stop hook")
 
         # Broadcast to output.sock subscribers (fire-and-forget)
         payload = {"ts": ts, "session": session, "turn": turn}
@@ -267,7 +266,7 @@ class Daemon:
         session = msg.get("session", "")
         data = msg.get("data", {})
 
-        log.info("hook event received", event=event, session=session)
+        log.info("hook event received", hook_event=event, session=session)
 
         if event == "SessionStart":
             self._current_session_id = session
@@ -275,6 +274,9 @@ class Daemon:
         elif event == "PermissionRequest":
             self._permission_detected = True
             log.info("permission prompt detected via hook")
+            asyncio.get_event_loop().create_task(
+                self._broadcast_permission(session)
+            )
 
         elif event == "SessionEnd":
             log.info("claude session ended")
@@ -300,6 +302,14 @@ class Daemon:
         if self._fifo_mgr:
             self._fifo_mgr.remove(path)
 
+    def _on_output_fifo_add(self, path: Path) -> None:
+        """Called when a new out.* FIFO is detected by the directory watcher."""
+        log.info("output FIFO registered", path=str(path))
+
+    def _on_output_fifo_remove(self, path: Path) -> None:
+        """Called when an out.* FIFO is removed."""
+        log.info("output FIFO deregistered", path=str(path))
+
     def _on_silence_ready(self) -> None:
         """Called when stdout silence detector fires (fallback ready detection)."""
         log.info("ready detected", method="timeout")
@@ -320,29 +330,40 @@ class Daemon:
         """Inject queued messages if terminal is idle and Claude is ready."""
         if not self._message_queue:
             return
-        if self._pane is None:
-            return
 
-        # Check terminal activity
+        # Check terminal activity first — pane-independent, returns False if pane is None
         if self._is_terminal_active():
             log.info("injection suppressed: terminal active")
             return
 
-        # Check permission prompt
-        if self._permission_detected:
+        if self._pane is None:
+            return
+
+        # Determine Claude state via capture-pane (single source of truth).
+        state = State.UNKNOWN
+        if self._detector:
+            state = self._detector.get_state()
+
+        if state == State.PERMISSION:
+            if not self._permission_detected:
+                # First detection via capture-pane — broadcast alert.
+                self._permission_detected = True
+                asyncio.get_event_loop().create_task(
+                    self._broadcast_permission(self._current_session_id or "")
+                )
             log.info("injection suppressed: permission prompt")
             return
 
-        # Check capture-pane state
-        if self._detector:
-            state = self._detector.get_state()
-            if state == State.PERMISSION:
-                self._permission_detected = True
-                log.info("injection suppressed: permission prompt detected via capture-pane")
-                return
-            if state == State.GENERATING:
-                log.info("injection suppressed: Claude is generating")
-                return
+        if self._permission_detected:
+            # Permission flag was set (by hook or earlier capture-pane) but the
+            # prompt is no longer visible — the user resolved it without a Stop
+            # hook firing (e.g. answered No, or hook failed).
+            self._permission_detected = False
+            log.info("permission prompt cleared via capture-pane recovery")
+
+        if state == State.GENERATING:
+            log.info("injection suppressed: Claude is generating")
+            return
 
         messages = self._message_queue[:]
         self._message_queue.clear()
@@ -355,21 +376,43 @@ class Daemon:
             # Put messages back
             self._message_queue[:0] = messages
 
+    def _get_client_activity_ts(self) -> int:
+        """Return the Unix timestamp of last tmux client keyboard activity.
+
+        Uses #{client_activity} — tracks only real human keyboard events.
+        Daemon injections via send-keys do NOT update this value.
+        Returns 0 if unavailable.
+        """
+        if self._pane is None:
+            return 0
+        try:
+            result = self._pane.cmd("display-message", "-p", "#{client_activity}")
+            return int(result.stdout[0])
+        except Exception:
+            return 0
+
     def _is_terminal_active(self) -> bool:
         """Return True if a human used the terminal within idle_threshold."""
-        if self._last_terminal_input == 0.0:
+        ts = self._get_client_activity_ts()
+        if ts == 0:
             return False
-        elapsed = time.time() - self._last_terminal_input
-        return elapsed < self.cfg.idle_threshold
-
-    def _update_terminal_input_time(self) -> None:
-        """Update last_terminal_input (called by stdin monitor)."""
-        self._last_terminal_input = time.time()
+        return (time.time() - ts) < self.cfg.idle_threshold
 
     async def _broadcast(self, payload: dict) -> None:
         if self._broadcaster:
             count = await self._broadcaster.broadcast(payload)
             log.info("broadcast sent", subscriber_count=count)
+
+    async def _broadcast_permission(self, session: str) -> None:
+        """Alert all output.sock subscribers that a permission prompt appeared."""
+        payload = {
+            "type": "permission_request",
+            "ts": int(time.time()),
+            "session": session,
+        }
+        if self._broadcaster:
+            count = await self._broadcaster.broadcast(payload)
+            log.info("permission alert broadcast", subscriber_count=count)
 
     # ------------------------------------------------------------------
     # Properties for testing
@@ -388,14 +431,6 @@ class Daemon:
         self._permission_detected = value
 
     @property
-    def last_terminal_input(self) -> float:
-        return self._last_terminal_input
-
-    @last_terminal_input.setter
-    def last_terminal_input(self, value: float) -> None:
-        self._last_terminal_input = value
-
-    @property
     def broadcaster(self) -> Optional[OutputBroadcaster]:
         return self._broadcaster
 
@@ -403,6 +438,22 @@ class Daemon:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+def _proxy_env_prefix(cfg: Config) -> str:
+    """Return 'HTTP_PROXY=... HTTPS_PROXY=... ' to prepend to the claude send-keys command.
+
+    The proxy URL comes from cfg.claude_proxy, which is set only in Config and never
+    written to os.environ — so only the claude process in the tmux pane uses the proxy.
+    ccmux itself (Python process) makes no outbound HTTP calls and is unaffected.
+
+    tmux pane shells do not inherit the Python process environment, so the proxy
+    must be inlined into the send-keys command string.
+    """
+    proxy = cfg.claude_proxy
+    if proxy:
+        return f"HTTP_PROXY={proxy} HTTPS_PROXY={proxy} "
+    return ""
 
 
 def _warn_proxy() -> None:
@@ -435,12 +486,17 @@ def _write_mcp_config(cfg: Config) -> None:
 
 async def _run_daemon_and_mcp(cfg: Config) -> None:
     """Run the daemon alongside the MCP server."""
-    daemon = Daemon(cfg)
+    mcp_ready = asyncio.Event()
+    daemon = Daemon(cfg, mcp_ready=mcp_ready)
     mcp = create_server(cfg.runtime_dir)
 
     async with asyncio.TaskGroup() as tg:
+        tg.create_task(
+            run_server(
+                mcp, host="127.0.0.1", port=cfg.mcp_port, ready_event=mcp_ready
+            )
+        )
         tg.create_task(daemon.run())
-        tg.create_task(run_server(mcp, host="127.0.0.1", port=cfg.mcp_port))
 
 
 def main() -> None:

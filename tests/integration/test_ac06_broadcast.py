@@ -2,6 +2,10 @@
 
 Tests that stop hook → control.sock → output.sock broadcast works end-to-end.
 Layer: Integration/mock — fire_hook + control_server + broadcaster.
+
+Also covers:
+  T-06-real: hook.py → control.sock → _on_broadcast → output.sock → subscriber
+             (full pipeline without real Claude binary)
 """
 import asyncio
 import json
@@ -64,6 +68,28 @@ async def test_T06_2_multiple_subscribers(broadcaster, test_config):
 
     for _, w in connections:
         w.close()
+
+
+@pytest.mark.asyncio
+async def test_T06_real_hook_pipeline(net_daemon, test_config, fire_hook):
+    """T-06-real: hook.py → control.sock → _on_broadcast → output.sock → subscriber.
+
+    Fires hook.py as a real subprocess (no monkeypatching). Verifies the full
+    broadcast pipeline without a real Claude binary.
+    """
+    reader, writer = await connect_subscriber(test_config.output_sock)
+    await asyncio.sleep(0.1)  # let server register the subscriber
+
+    result = fire_hook("Stop", {"session_id": "pipe-session", "last_assistant_message": "hi"})
+    assert result.returncode == 0
+
+    data = await asyncio.wait_for(reader.readline(), timeout=2.0)
+    msg = json.loads(data)
+    assert msg["session"] == "pipe-session"
+    assert "ts" in msg
+    assert "turn" in msg
+
+    writer.close()
 
 
 @pytest.mark.asyncio

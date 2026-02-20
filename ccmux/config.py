@@ -17,6 +17,7 @@ class Config:
     backoff_initial: int
     backoff_cap: int
     project_root: Path
+    claude_proxy: str = ""  # HTTP proxy URL passed only to claude invocation; empty = no proxy
 
     @property
     def tmux_session(self) -> str:
@@ -42,10 +43,6 @@ class Config:
     def stdout_log(self) -> Path:
         return self.runtime_dir / "stdout.log"
 
-    @property
-    def stdin_log(self) -> Path:
-        return self.runtime_dir / "stdin.log"
-
 
 def load(project_root: Path | None = None) -> Config:
     """Load config from ccmux.toml; all fields have defaults."""
@@ -63,8 +60,13 @@ def load(project_root: Path | None = None) -> Config:
     timing = data.get("timing", {})
     mcp = data.get("mcp", {})
     recovery = data.get("recovery", {})
+    claude = data.get("claude", {})
 
     project_name = project.get("name") or os.path.basename(project_root)
+
+    # claude_proxy: explicit TOML value takes precedence; falls back to HTTP_PROXY env var.
+    # Only passed to the claude invocation — ccmux itself does not use this proxy.
+    claude_proxy = claude.get("proxy") or os.environ.get("HTTP_PROXY", "")
 
     return Config(
         project_name=project_name,
@@ -75,4 +77,5 @@ def load(project_root: Path | None = None) -> Config:
         backoff_initial=recovery.get("backoff_initial", 1),
         backoff_cap=recovery.get("backoff_cap", 60),
         project_root=project_root.resolve(),
+        claude_proxy=claude_proxy,
     )

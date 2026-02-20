@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from typing import Callable
 
 import libtmux
@@ -16,7 +15,6 @@ from ccmux.config import Config
 
 log = logging.getLogger(__name__)
 
-CLAUDE_START_CMD = "claude --dangerously-skip-permissions"
 CLAUDE_CONTINUE_CMD = "claude --dangerously-skip-permissions --continue"
 
 
@@ -31,10 +29,16 @@ class LifecycleManager:
         config: Config,
         pane: libtmux.Pane,
         on_restart: Callable[[], None] | None = None,
+        poll_interval: float = 2.0,
     ) -> None:
         self.config = config
         self.pane = pane
         self.on_restart = on_restart
+        self._poll_interval = poll_interval
+        # Restart count grows monotonically and is never reset.
+        # If Claude ran stably for days then crashes again, the next backoff
+        # immediately caps at backoff_cap. This is intentional: conservative
+        # recovery for a 24/7 daemon avoids rapid restart storms.
         self._restart_count = 0
         self._running = False
         self._task: asyncio.Task | None = None
@@ -97,9 +101,8 @@ class LifecycleManager:
         return True  # assume running if we can't determine
 
     async def _monitor(self) -> None:
-        poll_interval = 2.0  # seconds between checks
         while self._running:
-            await asyncio.sleep(poll_interval)
+            await asyncio.sleep(self._poll_interval)
             if not self._is_claude_running():
                 log.warning(
                     "claude process died, restarting",
@@ -125,9 +128,8 @@ class LifecycleManager:
         await asyncio.sleep(backoff)
 
         try:
-            # Use --continue to preserve conversation context
-            cmd = CLAUDE_CONTINUE_CMD if self._restart_count > 1 else CLAUDE_START_CMD
-            self.pane.send_keys(cmd, enter=True)
+            # Always use --continue to preserve conversation history on restart
+            self.pane.send_keys(CLAUDE_CONTINUE_CMD, enter=True)
         except Exception as e:
             log.error("failed to restart claude", extra={"error": str(e)})
             return

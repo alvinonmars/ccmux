@@ -59,6 +59,7 @@ def test_config(tmp_path: Path) -> Config:
         backoff_initial=1,
         backoff_cap=10,
         project_root=REPO_ROOT,
+        claude_proxy="",            # no proxy for mock tests; real_claude_proxy fixture sets this
     )
 
 
@@ -185,6 +186,43 @@ def mock_pane(
         pass
 
 
+@pytest.fixture
+def make_mock_pane(
+    tmux_server: libtmux.Server, test_config: Config
+) -> Generator:
+    """Factory fixture: creates tmux panes running mock_pane.py with custom env vars.
+
+    Each call creates a uniquely-named tmux session; all are killed on teardown.
+
+    Usage:
+        pane = make_mock_pane()                          # default env
+        pane = make_mock_pane({"MOCK_SPINNER": "15"})   # custom env
+    """
+    import itertools
+
+    counter = itertools.count()
+    sessions: list[str] = []
+
+    def _factory(env: dict[str, str] | None = None) -> libtmux.Pane:
+        session_name = f"{test_config.tmux_session}-mp{next(counter)}"
+        sessions.append(session_name)
+        session = tmux_server.new_session(session_name=session_name, window_name="test")
+        pane = session.active_window.active_pane
+        env_prefix = " ".join(f"{k}='{v}'" for k, v in (env or {}).items())
+        cmd = f"{env_prefix} {sys.executable} {MOCK_PANE_SCRIPT}".strip()
+        pane.send_keys(cmd, enter=True)
+        time.sleep(0.4)
+        return pane
+
+    yield _factory
+
+    for name in sessions:
+        try:
+            tmux_server.kill_session(target_session=name)
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # fire_hook fixture
 # ---------------------------------------------------------------------------
@@ -225,11 +263,48 @@ def fire_hook(test_config: Config):
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# real_claude fixture
+# ---------------------------------------------------------------------------
+
+_PROXY_URL = "http://127.0.0.1:8118"
+
+
+@pytest.fixture
+def real_claude_proxy(test_config: Config):
+    """Fixture for tests requiring real Claude Code (marked real_claude).
+
+    Checks that the HTTP proxy is running at port 8118; skips the test if not.
+    Sets test_config.claude_proxy so the daemon passes the proxy only to the
+    claude send-keys command. The Python test process and all other subprocesses
+    are NOT affected — os.environ is never modified.
+
+    Usage:
+        @pytest.mark.real_claude
+        async def test_foo(real_claude_proxy, test_config, ...):
+            ...  # test_config.claude_proxy is already set
+
+    To run real_claude tests:
+        .venv/bin/python -m pytest tests/ -m real_claude -v
+    """
+    result = subprocess.run(
+        ["curl", "-s", "--proxy", _PROXY_URL, "--max-time", "3", "https://ipinfo.io/ip"],
+        capture_output=True,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"HTTP proxy not running at {_PROXY_URL} — start proxy before running real_claude tests")
+
+    test_config.claude_proxy = _PROXY_URL
+    yield
+    test_config.claude_proxy = ""
+
+
+# ---------------------------------------------------------------------------
 # pytest markers
 # ---------------------------------------------------------------------------
 
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
-        "real_claude: mark test as requiring real claude binary",
+        "real_claude: mark test as requiring real claude binary and HTTP proxy",
     )

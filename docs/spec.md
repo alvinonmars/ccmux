@@ -173,7 +173,7 @@ Adapters create their own FIFOs on startup; the daemon auto-discovers them via i
 | Transcript watcher | inotify on transcript JSONL tail; reads and broadcasts new lines (**fallback**: used when Stop hook fails) |
 | Output pub/sub | Maintains subscriber list, broadcasts complete turns |
 | Lifecycle manager | Monitors Claude Code process, restarts with exponential backoff on crash |
-| Terminal monitor (pipe-pane) | Side-channel observation of pane stdin, updates `last_terminal_input_time` |
+| Terminal activity detector | Reads `#{client_activity}` via `tmux display-message`; returns last interactive client keyboard timestamp; server-wide scope |
 | Logger | Structured JSON logs |
 
 ### Message Collection and Injection Flow
@@ -186,9 +186,9 @@ Claude completes a turn
         {"type": "broadcast", "session": "...", "turn": [...blocks...]}
     → daemon receives on control.sock
     → daemon broadcasts to all output.sock subscribers
-    → daemon checks: pipe-pane -I shows terminal input within last N seconds?
-        yes → skip injection, wait for next stop hook
-        no  → drain all in.* FIFOs, format and inject all queued messages into Claude
+    → daemon checks: (now - #{client_activity}) > idle_threshold?
+        no  → skip injection (human recently active), wait for next stop hook
+        yes → drain all in.* FIFOs, format and inject all queued messages into Claude
 ```
 
 No priority queue, no Human/Agent classification, no batch size limit. Claude receives all queued messages and decides how to respond.
@@ -253,9 +253,28 @@ Detection mechanism (verified by SP-02):
 2. **Auxiliary confirmation**: `tmux capture-pane -p` snapshot — check if the last line contains `❯`
 3. **Permission prompt detection**: also silent (no spinner); use `capture-pane` text search for `Yes`/`No`/`allow`/`y/n` keywords; when detected, skip injection and trigger PermissionRequest routing (capture-pane check is the fallback if the hook doesn't fire)
 
+### Injection Gate Conditions
+
+Injection must satisfy **both** conditions simultaneously:
+
+| Condition | Mechanism | Rationale |
+|-----------|-----------|-----------|
+| **Claude is READY** | stdout silent ≥ `silence_timeout` s AND capture-pane last line contains `❯` | Prevents injecting mid-generation or into a permission prompt |
+| **Terminal idle** | `#{client_activity}` > `idle_threshold` s ago | Prevents interrupting a human actively using the terminal |
+
+```
+inject if and only if:
+    claude_state == READY
+    AND (now - tmux_client_activity) > idle_threshold
+```
+
 ### Terminal Activity Detection
 
-`tmux pipe-pane -I` side-channel monitors pane stdin, updating `last_terminal_input_time`. Before injecting, check: if < N seconds since last terminal input (default 30s), skip this injection window. This is the minimal rule that protects active human conversations from being interrupted.
+`tmux display-message -p "#{client_activity}"` returns the Unix timestamp of the last keyboard event from any interactive tmux client on the **entire tmux server** (not limited to the session where Claude runs). Daemon injections via `tmux send-keys` do **not** update this timestamp — send-keys is a server-side API call, not a client keyboard event. Empirically verified: `#{client_activity}` stays constant across time and across multiple `send-keys` invocations until a human physically presses a key.
+
+Server-wide scope is intentional: if the user is actively typing in *any* tmux window, they are focused on their computer and ccmux should not inject interruptions.
+
+This is why `#{client_activity}` is used instead of `pipe-pane -I`: `pipe-pane -I` captures all bytes arriving at the pane's PTY master regardless of source, including daemon-injected bytes, creating a circular dependency where each injection would suppress the next one for `idle_threshold` seconds.
 
 ### MCP Server
 
@@ -383,6 +402,12 @@ port = 9876              # MCP SSE server port (binds to 127.0.0.1 only)
 [recovery]
 backoff_initial = 1      # seconds before first restart attempt
 backoff_cap     = 60     # maximum seconds between restart attempts
+
+[claude]
+proxy = ""               # HTTP proxy URL passed only to the claude invocation.
+                         # ccmux itself never uses this proxy.
+                         # Falls back to HTTP_PROXY env var if not set here.
+                         # Example: "http://127.0.0.1:8118"
 ```
 
 **tmux session name**: `ccmux-{project.name}`. Multiple ccmux instances for different projects co-exist without collision.
