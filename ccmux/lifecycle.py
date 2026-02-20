@@ -15,7 +15,7 @@ from ccmux.config import Config
 
 log = logging.getLogger(__name__)
 
-CLAUDE_CONTINUE_CMD = "claude --dangerously-skip-permissions --continue"
+_CLAUDE_BASE_CMD = "claude --dangerously-skip-permissions --continue"
 
 
 class LifecycleManager:
@@ -56,6 +56,19 @@ class LifecycleManager:
     @property
     def restart_count(self) -> int:
         return self._restart_count
+
+    def _build_restart_cmd(self) -> str:
+        """Build the full restart command including env vars.
+
+        Mirrors the fresh-start command in daemon.py:193-196 but adds --continue.
+        """
+        parts: list[str] = []
+        proxy = self.config.claude_proxy
+        if proxy:
+            parts.append(f"HTTP_PROXY={proxy} HTTPS_PROXY={proxy}")
+        parts.append(f"CCMUX_CONTROL_SOCK={self.config.control_sock}")
+        parts.append(_CLAUDE_BASE_CMD)
+        return " ".join(parts)
 
     def _get_claude_pid(self) -> int | None:
         """Get the PID of the claude process running in the pane, or None."""
@@ -128,8 +141,11 @@ class LifecycleManager:
         await asyncio.sleep(backoff)
 
         try:
-            # Always use --continue to preserve conversation history on restart
-            self.pane.send_keys(CLAUDE_CONTINUE_CMD, enter=True)
+            # Always use --continue to preserve conversation history on restart.
+            # Include the same env vars as the initial launch (daemon.py:193-196):
+            # proxy for network access, CCMUX_CONTROL_SOCK for hook.py.
+            cmd = self._build_restart_cmd()
+            self.pane.send_keys(cmd, enter=True)
         except Exception as e:
             log.error("failed to restart claude", extra={"error": str(e)})
             return

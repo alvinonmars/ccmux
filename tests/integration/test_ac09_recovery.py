@@ -14,7 +14,7 @@ import time
 from unittest.mock import patch
 
 from ccmux.injector import Message, inject_messages
-from ccmux.lifecycle import CLAUDE_CONTINUE_CMD, LifecycleManager
+from ccmux.lifecycle import LifecycleManager
 
 
 class _FakePane:
@@ -68,7 +68,7 @@ async def test_T09_1_crash_detected_and_restarted(test_config, caplog):
 
 
 async def test_T09_2_restart_uses_continue_cmd(test_config):
-    """T-09-2: restart sends CLAUDE_CONTINUE_CMD; on_restart fires; injection works after.
+    """T-09-2: restart command includes --continue, proxy env vars, and CCMUX_CONTROL_SOCK.
 
     Note: pipe-pane re-mount requires a real tmux session; that behavior is verified
     end-to-end in AC-12 T-12-1 (daemon restart + attach to existing session + re-mount).
@@ -82,6 +82,7 @@ async def test_T09_2_restart_uses_continue_cmd(test_config):
 
     test_config.backoff_initial = 0.1
     test_config.backoff_cap = 10
+    test_config.claude_proxy = "http://127.0.0.1:8118"
     mgr = LifecycleManager(test_config, pane, on_restart=on_restart, poll_interval=0.2)
     mgr._is_claude_running = lambda: alive[0]
 
@@ -92,11 +93,23 @@ async def test_T09_2_restart_uses_continue_cmd(test_config):
     await asyncio.wait_for(on_restart_fired.wait(), timeout=3.0)
     mgr.stop()
 
-    # Restart command must be --continue (preserve conversation history)
-    assert CLAUDE_CONTINUE_CMD in pane.sent_keys, (
-        f"expected CLAUDE_CONTINUE_CMD in sent keys, got: {pane.sent_keys}"
-    )
     assert mgr.restart_count == 1
+    assert pane.sent_keys, "restart command should have been sent to pane"
+
+    restart_cmd = pane.sent_keys[0]
+    # Must include --continue to preserve conversation history
+    assert "--continue" in restart_cmd, f"missing --continue: {restart_cmd}"
+    # Must include proxy env vars (matching daemon.py fresh-start command)
+    assert "HTTP_PROXY=http://127.0.0.1:8118" in restart_cmd, (
+        f"missing HTTP_PROXY: {restart_cmd}"
+    )
+    assert "HTTPS_PROXY=http://127.0.0.1:8118" in restart_cmd, (
+        f"missing HTTPS_PROXY: {restart_cmd}"
+    )
+    # Must include CCMUX_CONTROL_SOCK so hook.py can find the daemon
+    assert "CCMUX_CONTROL_SOCK=" in restart_cmd, (
+        f"missing CCMUX_CONTROL_SOCK: {restart_cmd}"
+    )
 
     # Pane is still usable for injection after restart
     inject_messages(pane, [Message(channel="test", content="hello after restart", ts=int(time.time()))])

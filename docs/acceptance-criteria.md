@@ -336,12 +336,12 @@ Located in `tests/spikes/`. Each spike is an independently runnable program. All
 | Ready detected | `event`, `ts`, `method` (`prompt`/`timeout`/`skipped`) |
 | Broadcast sent | `event`, `ts`, `subscriber_count` |
 | Tool call | `event`, `ts`, `channel`, `message_len` |
-| Process crash | `event`, `ts`, `pid` |
+| Process crash | `event`, `ts`, `restart_count` |
 | Process restart | `event`, `ts`, `restart_count`, `backoff_seconds` |
 
 | ID | Scenario | Verification |
 |----|----------|-------------|
-| T-10-1 | Full injection flow | Log contains: receive → inject → ready → broadcast, in correct order |
+| T-10-1 | Full injection flow | Log contains: receive → ready → inject → broadcast, in correct order |
 | T-10-2 | Crash recovery | Log contains crash + restart + backoff_seconds event sequence |
 | T-10-3 | Invalid input | Log contains an `error`-level entry |
 
@@ -430,21 +430,19 @@ _This section is the single source of truth for development progress. Update it 
 | Iter-3 | AC-02: Output FIFO channel write (T-02-3/T-02-4) | 68 tests passing (+2) | Extracted `_send_to_channel` coroutine from MCP closure (testable); wired `on_output_add/remove` callbacks in daemon; T-02-3 verifies FIFO write end-to-end; T-02-4 verifies error return + warning logged |
 | Iter-4 | AC-09: Crash recovery (T-09-1~4) | 70 tests passing (+2) | Added poll_interval param to LifecycleManager (testable); fixed restart cmd (always CLAUDE_CONTINUE_CMD); T-09-1 verifies crash detection timing + log; T-09-2 verifies correct restart cmd; T-09-3 lower+upper bound on backoff intervals; T-09-4 cap verified via mocked asyncio.sleep |
 | Iter-5 | AC-13 (PermissionRequest routing) + AC-06 real pipeline | 75 tests passing (+5) | Fixed `_check_permission_prompt` false positive (last 5 lines + ❯-at-end guard); fixed `_permission_detected` sticky flag (cleared in `_on_broadcast` on Stop hook); fixed daemon.py `log.info("hook event received", event=event)` structlog keyword conflict (renamed to `hook_event=event`); T-13-1/3: fire_hook + bare_pane; T-13-2: bare_pane typed text; T-06-real: hook.py→control.sock→output.sock pipeline. **Post-review fixes**: (1) MCP startup race resolved — `run_server()` signals `asyncio.Event` after port bind, daemon awaits before `_write_mcp_config()`; (2) AC-13 alert broadcast — permission_request event sent to output.sock subscribers (T-13-1 verifies); (3) capture-pane recovery — stale `_permission_detected` flag cleared when capture-pane no longer shows permission text (T-13-4) |
+| Iter-6 | AC-07 mock complete + AC-10 logging + lifecycle restart bug | 80 tests passing (+5) | T-07-2/3: thinking + tool_use block passthrough via crafted transcripts; T-10-1: injection flow log order (receive→ready→inject→broadcast) with field assertions; T-10-2: crash recovery log fields (restart_count, backoff_seconds); T-10-3: error-level log on injection failure; lifecycle.py `_build_restart_cmd()` includes proxy env vars + CCMUX_CONTROL_SOCK. **Closure fixes**: AC-10 spec text order corrected; AC-10 crash event field updated (pid→restart_count); AC-07 ts fallback masking removed. 2 closure rounds, 2 consecutive clean. |
 
 ### Pending
 
 _Each iteration is complete only when both its mock and real_claude tests pass. real_claude tests run manually at each iteration milestone (marked `@pytest.mark.real_claude`, skipped in CI)._
 
-| # | AC | Mock tests | real_claude tests | Blocker |
-|---|----|-----------|--------------------|---------|
-| 6 | AC-07 complete | T-07-1, T-07-4 (already passing) | T-07-2: thinking blocks; T-07-3: tool_use blocks | After Iter-5 |
-| 7 | AC-08 | — | T-08-1~3: Claude calls send_to_channel MCP tool | After Iter-6 |
-| 8 | AC-10 | T-10-1~3: structured log assertions reusing fixtures from above | — | After Iter-7 |
-| 9 | AC-00 + AC-11 + AC-12 | T-00-2~4, T-11-2/3, T-12-1~4 | T-00-1: fresh start with real claude | After Iter-8 |
+| # | Scope | Mock tests | real_claude tests | Notes |
+|---|-------|-----------|-------------------|-------|
+| 7 | AC-00 + AC-11 + AC-12 + all real_claude | T-00-2~4, T-11-3, T-12-1~4 | T-00-1 (fresh start); T-07-2/3 (format verification); T-08-1~3 (MCP tool call) | Final iteration, closes all ACs |
 
 ### Known Issues (carry-forward)
 
 | File | Issue | Affects |
 |------|-------|---------|
-| `ccmux/lifecycle.py:_is_claude_running` | Process detection logic (pgrep + capture-pane fallback) is never exercised by tests; all AC-09 tests monkeypatch this method. Also: after restart, monitor resumes polling immediately — correct behavior relies on pgrep finding the new claude process within `poll_interval` seconds (typically safe, but untested). Real coverage requires `bare_pane` + actual process kill. | AC-09 |
-| `mock_pane.py` PTY stdin behavior | `mock_pane`'s `sys.stdin.readline()` for the permission-resolution wait returns immediately (empty string) in a PTY context — the turn completes before the test can sample the permission state. AC-13 T-13-1/2/3/4 worked around this by using `fire_hook` + `bare_pane` instead. If mock_pane is ever needed for permission-state tests, use `MOCK_PERMISSION_DURATION` env var (not yet implemented) to sleep instead of readline. | AC-13 |
+| `ccmux/lifecycle.py:_is_claude_running` | Process detection logic (pgrep + capture-pane fallback) is never exercised by tests; all AC-09 tests monkeypatch this method. Real coverage requires `bare_pane` + actual process kill. | AC-09 |
+| `mock_pane.py` PTY stdin behavior | `mock_pane`'s `sys.stdin.readline()` for the permission-resolution wait returns immediately (empty string) in a PTY context. AC-13 tests worked around this by using `fire_hook` + `bare_pane` instead. | AC-13 |
