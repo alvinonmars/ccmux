@@ -7,7 +7,12 @@ dependencies = [
     "structlog",
     "watchdog",
     "mcp",
+    "uvicorn",
+    "starlette",
 ]
+
+[project.scripts]
+ccmux = "ccmux.daemon:main"
 
 [project.optional-dependencies]
 dev = [
@@ -19,3 +24,6 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "real_claude: requires real claude binary (skipped by default)",
+]
