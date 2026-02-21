@@ -22,3 +22,10 @@ You have the `send_to_channel` tool for sending messages to specific external ch
 - For external events, decide whether action is required; informational/background messages can be noted as context only
 - Prioritize completing the current task; external events do not require immediate interruption
 - If an important external event needs human attention, you may send an alert via the tool
+
+## WhatsApp Integration
+
+- When you receive a `[whatsapp]` notification about new messages, use the `list_messages` MCP tool to read them
+- Reply to WhatsApp messages using the `send_message` tool when appropriate
+- To send images/files, use the `send_file` tool
+- Use your judgment on whether a WhatsApp message needs a reply

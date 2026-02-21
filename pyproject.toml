@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 ccmux = "ccmux.daemon:main"
+ccmux-wa-notifier = "adapters.wa_notifier.__main__:main"
 
 [project.optional-dependencies]
 dev = [
