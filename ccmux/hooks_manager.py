@@ -1,4 +1,8 @@
-"""Install and remove ccmux hooks in ~/.claude/settings.json.
+"""Install ccmux hooks in project-level .claude/settings.json.
+
+Project-level hooks only fire for Claude instances running in this project
+directory, avoiding interference with independent Claude instances on the
+same machine.
 
 The hook entry is written idempotently: existing fields are preserved,
 and the hook command appears exactly once per event.
@@ -19,8 +23,6 @@ HOOK_EVENTS = [
     "PermissionRequest",
 ]
 
-_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
-
 
 def _read_settings(path: Path) -> dict:
     if path.exists():
@@ -36,8 +38,10 @@ def _write_settings(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def install(config: Config, settings_path: Path = _SETTINGS_PATH) -> None:
-    """Write ccmux hook entries into settings.json (idempotent)."""
+def install(config: Config, settings_path: Path | None = None) -> None:
+    """Write ccmux hook entries into project-level .claude/settings.json (idempotent)."""
+    if settings_path is None:
+        settings_path = config.project_root / ".claude" / "settings.json"
     command = str(config.hook_script.resolve())
     hook_entry = {"type": "command", "command": command}
     wrapper = {"hooks": [hook_entry]}
@@ -53,27 +57,6 @@ def install(config: Config, settings_path: Path = _SETTINGS_PATH) -> None:
             if not _is_ccmux_wrapper(w, command)
         ]
         event_list.append(wrapper)
-
-    _write_settings(settings_path, settings)
-
-
-def remove(config: Config, settings_path: Path = _SETTINGS_PATH) -> None:
-    """Remove ccmux hook entries from settings.json."""
-    command = str(config.hook_script.resolve())
-    settings = _read_settings(settings_path)
-    hooks_section: dict = settings.get("hooks", {})
-
-    for event in HOOK_EVENTS:
-        if event in hooks_section:
-            hooks_section[event] = [
-                w for w in hooks_section[event]
-                if not _is_ccmux_wrapper(w, command)
-            ]
-            if not hooks_section[event]:
-                del hooks_section[event]
-
-    if not hooks_section:
-        settings.pop("hooks", None)
 
     _write_settings(settings_path, settings)
 

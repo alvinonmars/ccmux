@@ -11,7 +11,6 @@ Environment variables:
   MOCK_TRANSCRIPT        Transcript file path; appends JSONL line after each reply
   MOCK_HOOK_SCRIPT       Hook script path; called after each reply with Stop hook JSON
   MOCK_SPINNER           If > 0, emit N spinner sequences before reply
-  MOCK_CONTINUOUS_SPINNER If > 0, emit spinner sequences indefinitely until input arrives
   MOCK_PERMISSION_INTERVAL If > 0, every N turns: output permission prompt, call hook with
                            PermissionRequest JSON, wait for next stdin
 """
@@ -92,13 +91,11 @@ def main() -> None:
     reply = _env("MOCK_REPLY", "mock reply")
     delay = _env_float("MOCK_DELAY", 0.1)
     spinner_count = _env_int("MOCK_SPINNER", 0)
-    continuous_spinner = _env_int("MOCK_CONTINUOUS_SPINNER", 0)
     permission_interval = _env_int("MOCK_PERMISSION_INTERVAL", 0)
 
     session_id = f"mock-{os.getpid()}"
     turn = 0
 
-    # Make stdin non-blocking for continuous spinner detection
     emit(prompt)
 
     while True:
@@ -112,33 +109,7 @@ def main() -> None:
 
         time.sleep(delay)
 
-        # Continuous spinner: emit until we detect silence then stop
-        # (simulated: emit for a fixed burst, then stop)
-        if continuous_spinner:
-            # Emit spinner continuously in a tight loop
-            # Stop when no more input is pending (simulate generating state)
-            stop_time = time.time() + 999999  # run "forever" until interrupted
-            # We use a flag file to signal stop (set by test), or just
-            # emit until next stdin. Actually: emit until we get input.
-            # But we're in a sync readline() loop. Use a thread approach:
-            import threading
-            stop_event = threading.Event()
-
-            def spinner_thread():
-                while not stop_event.is_set():
-                    emit(SPINNER_SEQ)
-                    time.sleep(0.1)
-
-            t = threading.Thread(target=spinner_thread, daemon=True)
-            t.start()
-            # Wait for next input line (this is the "next turn" signal)
-            # In the continuous spinner test, we don't expect another input;
-            # the test just checks that ready event does NOT fire while spinning.
-            # For simplicity, emit spinner for 10s then stop.
-            time.sleep(10)
-            stop_event.set()
-            t.join(timeout=1.0)
-        elif spinner_count > 0:
+        if spinner_count > 0:
             for _ in range(spinner_count):
                 emit(SPINNER_SEQ)
                 time.sleep(0.1)

@@ -4,7 +4,7 @@ Startup sequence (per spec):
 1. Environment check (HTTP proxy warning)
 2. Hook installation
 3. MCP server start
-4. MCP config write (~/.claude.json)
+4. MCP config write (.mcp.json)
 5. tmux session handling
 6. pipe-pane mount
 7. Directory watcher start
@@ -72,6 +72,7 @@ class Daemon:
         self._lifecycle: Optional[LifecycleManager] = None
         self._stdout_monitor: Optional[StdoutMonitor] = None
         self._detector: Optional[ReadyDetector] = None
+        self._retry_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -116,8 +117,8 @@ class Daemon:
             loop,
             on_input_add=self._on_fifo_add,
             on_input_remove=self._on_fifo_remove,
-            on_output_add=self._on_output_fifo_add,
-            on_output_remove=self._on_output_fifo_remove,
+            on_output_add=None,
+            on_output_remove=None,
         )
         self._watcher.start()
         self._watcher.scan_existing()
@@ -137,6 +138,8 @@ class Daemon:
                 stdout_log=self.cfg.stdout_log,
                 silence_timeout=self.cfg.silence_timeout,
                 on_ready=self._on_silence_ready,
+                max_bytes=self.cfg.stdout_log_max_bytes,
+                on_truncate=self._mount_pipe_pane,
             )
             self._stdout_monitor.start()
 
@@ -160,6 +163,8 @@ class Daemon:
         self._running = False
         log.info("daemon stopping")
 
+        if self._retry_task and not self._retry_task.done():
+            self._retry_task.cancel()
         if self._lifecycle:
             self._lifecycle.stop()
         if self._stdout_monitor:
@@ -181,7 +186,7 @@ class Daemon:
 
     async def _setup_tmux(self) -> None:
         server = libtmux.Server()
-        session = server.find_where({"session_name": self.cfg.tmux_session})
+        session = server.sessions.get(session_name=self.cfg.tmux_session, default=None)
 
         if session is None:
             log.info("creating new tmux session", session=self.cfg.tmux_session)
@@ -302,14 +307,6 @@ class Daemon:
         if self._fifo_mgr:
             self._fifo_mgr.remove(path)
 
-    def _on_output_fifo_add(self, path: Path) -> None:
-        """Called when a new out.* FIFO is detected by the directory watcher."""
-        log.info("output FIFO registered", path=str(path))
-
-    def _on_output_fifo_remove(self, path: Path) -> None:
-        """Called when an out.* FIFO is removed."""
-        log.info("output FIFO deregistered", path=str(path))
-
     def _on_silence_ready(self) -> None:
         """Called when stdout silence detector fires (fallback ready detection)."""
         log.info("ready detected", method="timeout")
@@ -334,6 +331,7 @@ class Daemon:
         # Check terminal activity first — pane-independent, returns False if pane is None
         if self._is_terminal_active():
             log.info("injection suppressed: terminal active")
+            self._schedule_retry()
             return
 
         if self._pane is None:
@@ -375,6 +373,18 @@ class Daemon:
             log.error("injection failed", error=str(e))
             # Put messages back
             self._message_queue[:0] = messages
+
+    def _schedule_retry(self) -> None:
+        """Schedule a deferred injection retry when suppressed by terminal activity."""
+        if self._retry_task and not self._retry_task.done():
+            return  # already scheduled
+        self._retry_task = asyncio.get_event_loop().create_task(self._retry_inject())
+
+    async def _retry_inject(self) -> None:
+        """Wait for idle threshold to pass, then retry injection."""
+        await asyncio.sleep(self.cfg.idle_threshold + 1)
+        if self._message_queue:
+            await self._maybe_inject()
 
     def _get_client_activity_ts(self) -> int:
         """Return the Unix timestamp of last tmux client keyboard activity.
@@ -463,12 +473,16 @@ def _warn_proxy() -> None:
 
 
 def _write_mcp_config(cfg: Config) -> None:
-    """Write MCP server address into ~/.claude.json."""
-    claude_json = Path.home() / ".claude.json"
+    """Write MCP server address into project-level .mcp.json.
+
+    Project-level .mcp.json is only visible to Claude instances running in
+    this project directory, avoiding pollution of global ~/.claude.json.
+    """
+    mcp_json = cfg.project_root / ".mcp.json"
     data: dict = {}
-    if claude_json.exists():
+    if mcp_json.exists():
         try:
-            data = json.loads(claude_json.read_text())
+            data = json.loads(mcp_json.read_text())
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -476,7 +490,7 @@ def _write_mcp_config(cfg: Config) -> None:
         "type": "sse",
         "url": cfg.mcp_url,
     }
-    claude_json.write_text(json.dumps(data, indent=2) + "\n")
+    mcp_json.write_text(json.dumps(data, indent=2) + "\n")
 
 
 # ------------------------------------------------------------------

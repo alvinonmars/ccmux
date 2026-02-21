@@ -2,8 +2,16 @@
 from __future__ import annotations
 
 import os
-import tomllib
+import sys
 from dataclasses import dataclass
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    try:
+        import tomllib  # type: ignore[import]
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
 from pathlib import Path
 
 
@@ -18,6 +26,7 @@ class Config:
     backoff_cap: int
     project_root: Path
     claude_proxy: str = ""  # HTTP proxy URL passed only to claude invocation; empty = no proxy
+    stdout_log_max_bytes: int = 1_048_576  # 1MB; stdout.log truncated when exceeded
 
     @property
     def tmux_session(self) -> str:
@@ -78,4 +87,5 @@ def load(project_root: Path | None = None) -> Config:
         backoff_cap=recovery.get("backoff_cap", 60),
         project_root=project_root.resolve(),
         claude_proxy=claude_proxy,
+        stdout_log_max_bytes=runtime.get("stdout_log_max_bytes", 1_048_576),
     )

@@ -431,6 +431,7 @@ _This section is the single source of truth for development progress. Update it 
 | Iter-4 | AC-09: Crash recovery (T-09-1~4) | 70 tests passing (+2) | Added poll_interval param to LifecycleManager (testable); fixed restart cmd (always CLAUDE_CONTINUE_CMD); T-09-1 verifies crash detection timing + log; T-09-2 verifies correct restart cmd; T-09-3 lower+upper bound on backoff intervals; T-09-4 cap verified via mocked asyncio.sleep |
 | Iter-5 | AC-13 (PermissionRequest routing) + AC-06 real pipeline | 75 tests passing (+5) | Fixed `_check_permission_prompt` false positive (last 5 lines + ❯-at-end guard); fixed `_permission_detected` sticky flag (cleared in `_on_broadcast` on Stop hook); fixed daemon.py `log.info("hook event received", event=event)` structlog keyword conflict (renamed to `hook_event=event`); T-13-1/3: fire_hook + bare_pane; T-13-2: bare_pane typed text; T-06-real: hook.py→control.sock→output.sock pipeline. **Post-review fixes**: (1) MCP startup race resolved — `run_server()` signals `asyncio.Event` after port bind, daemon awaits before `_write_mcp_config()`; (2) AC-13 alert broadcast — permission_request event sent to output.sock subscribers (T-13-1 verifies); (3) capture-pane recovery — stale `_permission_detected` flag cleared when capture-pane no longer shows permission text (T-13-4) |
 | Iter-6 | AC-07 mock complete + AC-10 logging + lifecycle restart bug | 80 tests passing (+5) | T-07-2/3: thinking + tool_use block passthrough via crafted transcripts; T-10-1: injection flow log order (receive→ready→inject→broadcast) with field assertions; T-10-2: crash recovery log fields (restart_count, backoff_seconds); T-10-3: error-level log on injection failure; lifecycle.py `_build_restart_cmd()` includes proxy env vars + CCMUX_CONTROL_SOCK. **Closure fixes**: AC-10 spec text order corrected; AC-10 crash event field updated (pid→restart_count); AC-07 ts fallback masking removed. 2 closure rounds, 2 consecutive clean. |
+| Iter-7a | Production readiness: P0/P1 fixes + AC-12 + E2E smoke | 89 tests passing (+9) | **P0-2**: hook.py `_log_error()` replaces silent `except: pass` — writes JSONL to `hook_errors.log` + stderr, self-truncates at 100KB (3 tests). **P0-1**: `stdout_log_max_bytes` config + `StdoutMonitor` truncation + pipe-pane remount callback (1 test). **P1-1**: `_is_claude_running()` fail-safe changed from `return True` to `return False` + warning log (1 test). **P1-2**: transcript watcher deferred in spec.md; known issue added. **P1-3**: AC-12 T-12-1/2/3 (daemon re-attach, injection, broadcast after restart). **P1-4**: E2E mock smoke test (full chain: FIFO→queue→inject→hook→broadcast). |
 
 ### Pending
 
@@ -438,7 +439,7 @@ _Each iteration is complete only when both its mock and real_claude tests pass. 
 
 | # | Scope | Mock tests | real_claude tests | Notes |
 |---|-------|-----------|-------------------|-------|
-| 7 | AC-00 + AC-11 + AC-12 + all real_claude | T-00-2~4, T-11-3, T-12-1~4 | T-00-1 (fresh start); T-07-2/3 (format verification); T-08-1~3 (MCP tool call) | Final iteration, closes all ACs |
+| 7b | AC-00 + AC-11 remaining + all real_claude | T-00-2~4, T-11-3, T-12-4 | T-00-1 (fresh start); T-07-2/3 (format verification); T-08-1~3 (MCP tool call) | Final iteration, closes all ACs |
 
 ### Known Issues (carry-forward)
 
@@ -446,3 +447,4 @@ _Each iteration is complete only when both its mock and real_claude tests pass. 
 |------|-------|---------|
 | `ccmux/lifecycle.py:_is_claude_running` | Process detection logic (pgrep + capture-pane fallback) is never exercised by tests; all AC-09 tests monkeypatch this method. Real coverage requires `bare_pane` + actual process kill. | AC-09 |
 | `mock_pane.py` PTY stdin behavior | `mock_pane`'s `sys.stdin.readline()` for the permission-resolution wait returns immediately (empty string) in a PTY context. AC-13 tests worked around this by using `fire_hook` + `bare_pane` instead. | AC-13 |
+| Broadcast chain single point of failure | Broadcast chain depends on Stop hook → hook.py → control.sock. If daemon is down, payloads are lost. Mitigation: hook.py error logging (P0-2) writes failed payloads to `hook_errors.log` with structured JSONL. Transcript watcher fallback is deferred. | AC-06, AC-07 |

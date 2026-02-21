@@ -176,3 +176,77 @@ def test_hook_silently_succeeds_when_daemon_not_running(tmp_path):
     }
     rc, stdout, stderr = _run_hook(HOOK_SCRIPT, data)
     assert rc == 0  # must not crash
+
+
+# ---------------------------------------------------------------------------
+# P0-2: hook.py error logging tests
+# ---------------------------------------------------------------------------
+
+def test_hook_error_log_written_on_socket_failure(tmp_path):
+    """Error log file written to <runtime_dir>/hook_errors.log on socket failure."""
+    # Point CCMUX_CONTROL_SOCK to a non-existent socket inside tmp_path
+    # so hook.py tries to connect and fails, triggering _log_error.
+    sock_path = tmp_path / "nonexistent.sock"
+    data = {
+        "hook_event_name": "Stop",
+        "session_id": "err-session",
+        "transcript_path": str(tmp_path / "none.jsonl"),
+        "last_assistant_message": "payload",
+        "cwd": str(tmp_path),
+        "permission_mode": "default",
+    }
+    rc, _, _ = _run_hook(HOOK_SCRIPT, data, control_sock=sock_path)
+    assert rc == 0
+
+    error_log = tmp_path / "hook_errors.log"
+    assert error_log.exists(), "hook_errors.log should be created on socket failure"
+
+    content = error_log.read_text()
+    entry = json.loads(content.strip().split("\n")[-1])
+    assert "ts" in entry
+    assert "error" in entry
+    assert entry["payload_type"] == "broadcast"
+
+
+def test_hook_error_stderr_output(tmp_path):
+    """stderr output contains 'ccmux hook:' prefix on socket failure."""
+    sock_path = tmp_path / "nonexistent.sock"
+    data = {
+        "hook_event_name": "Stop",
+        "session_id": "err-session",
+        "transcript_path": str(tmp_path / "none.jsonl"),
+        "last_assistant_message": "payload",
+        "cwd": str(tmp_path),
+        "permission_mode": "default",
+    }
+    rc, _, stderr = _run_hook(HOOK_SCRIPT, data, control_sock=sock_path)
+    assert rc == 0
+    assert b"ccmux hook:" in stderr, f"stderr should contain 'ccmux hook:', got: {stderr}"
+
+
+def test_hook_error_log_truncated_when_oversized(tmp_path):
+    """hook_errors.log is truncated when pre-filled beyond 100KB."""
+    sock_path = tmp_path / "nonexistent.sock"
+    error_log = tmp_path / "hook_errors.log"
+
+    # Pre-fill with >100KB of data
+    error_log.write_text("x" * 110_000 + "\n")
+    assert error_log.stat().st_size > 100_000
+
+    data = {
+        "hook_event_name": "Stop",
+        "session_id": "trunc-session",
+        "transcript_path": str(tmp_path / "none.jsonl"),
+        "last_assistant_message": "payload",
+        "cwd": str(tmp_path),
+        "permission_mode": "default",
+    }
+    rc, _, _ = _run_hook(HOOK_SCRIPT, data, control_sock=sock_path)
+    assert rc == 0
+
+    # File should have been truncated (overwritten with single entry)
+    new_size = error_log.stat().st_size
+    assert new_size < 1000, f"hook_errors.log should be truncated, but is {new_size} bytes"
+    content = error_log.read_text().strip()
+    entry = json.loads(content)
+    assert entry["payload_type"] == "broadcast"

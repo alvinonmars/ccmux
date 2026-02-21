@@ -6,12 +6,56 @@ It reads hook data from stdin, processes the event, and notifies the daemon
 via the control socket. Must be self-contained (stdlib only) to guarantee
 portability regardless of venv state.
 """
+from __future__ import annotations
+
 import json
 import os
+import re
 import socket
 import sys
-import tomllib
+import time
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None  # type: ignore[assignment]  # Python < 3.11
+
+_HOOK_ERROR_LOG_MAX_BYTES = 100_000  # 100KB self-truncation guard
+
+
+def _log_error(sock_path: str, exc: Exception, payload: dict) -> None:
+    """Log hook delivery failure to <runtime_dir>/hook_errors.log and stderr.
+
+    Structured JSONL format; self-truncates at 100KB. stdlib only.
+    """
+    try:
+        runtime_dir = Path(sock_path).parent
+        log_path = runtime_dir / "hook_errors.log"
+
+        entry = {
+            "ts": int(time.time()),
+            "error": str(exc),
+            "type": type(exc).__name__,
+            "sock_path": sock_path,
+            "payload_type": payload.get("type", ""),
+        }
+        line = json.dumps(entry) + "\n"
+
+        # Self-truncation: if existing file exceeds limit, overwrite
+        try:
+            if log_path.exists() and log_path.stat().st_size > _HOOK_ERROR_LOG_MAX_BYTES:
+                log_path.write_text(line)
+            else:
+                with open(log_path, "a") as f:
+                    f.write(line)
+        except OSError:
+            pass  # filesystem error — best effort
+
+        # Also print to stderr for environments that capture it
+        print(f"ccmux hook: {type(exc).__name__}: {exc}", file=sys.stderr)
+    except Exception:
+        pass  # _log_error must never raise
 
 
 def _get_control_sock(cwd: str) -> str:
@@ -28,9 +72,15 @@ def _get_control_sock(cwd: str) -> str:
     try:
         toml_path = Path(cwd) / "ccmux.toml"
         if toml_path.exists():
-            with open(toml_path, "rb") as f:
-                data = tomllib.load(f)
-            runtime_dir = data.get("runtime", {}).get("dir", "/tmp/ccmux")
+            if tomllib is not None:
+                with open(toml_path, "rb") as f:
+                    data = tomllib.load(f)
+                runtime_dir = data.get("runtime", {}).get("dir", "/tmp/ccmux")
+            else:
+                # Fallback for Python < 3.11: regex extraction
+                text = toml_path.read_text()
+                m = re.search(r'^\s*dir\s*=\s*"([^"]+)"', text, re.MULTILINE)
+                runtime_dir = m.group(1) if m else "/tmp/ccmux"
             return str(Path(runtime_dir) / "control.sock")
     except Exception:
         pass
@@ -68,8 +118,8 @@ def _send_to_control(sock_path: str, payload: dict) -> None:
             s.settimeout(2.0)
             s.connect(sock_path)
             s.sendall(json.dumps(payload).encode() + b"\n")
-    except Exception:
-        pass  # Daemon may not be running; hook must never block Claude
+    except Exception as exc:
+        _log_error(sock_path, exc, payload)  # Daemon may not be running; hook must never block Claude
 
 
 def main() -> None:

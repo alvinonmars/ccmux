@@ -89,7 +89,6 @@ class FifoReader:
             return
 
         if not data:
-            # b'' on O_RDWR FIFO means no data available right now; not EOF
             return
 
         self._buf += data

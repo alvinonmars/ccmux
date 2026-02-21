@@ -9,8 +9,6 @@ from dataclasses import dataclass
 
 import libtmux
 
-from ccmux.config import Config
-
 
 @dataclass
 class Message:

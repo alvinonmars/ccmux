@@ -25,6 +25,7 @@ htmlcov/
 
 # Claude Code project-level settings (machine-local, may contain absolute paths)
 .claude/
+.mcp.json
 
 # Spike result files (contain machine-specific paths and session IDs)
 tests/spikes/**/sp*_results.txt

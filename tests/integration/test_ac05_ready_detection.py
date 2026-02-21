@@ -156,6 +156,36 @@ async def test_t05_5_silence_timeout_config_respected(tmp_path: Path):
     assert fired_at[0] >= 2.0, f"on_ready fired too early: {fired_at[0]:.3f}s"
 
 
+async def test_t05_truncation_fires_callback(tmp_path: Path):
+    """StdoutMonitor truncates file and fires on_truncate when size exceeds max_bytes.
+
+    Writes 2KB to stdout.log with max_bytes=1KB. Verifies:
+    - File is truncated to 0 bytes
+    - on_truncate callback is invoked
+    """
+    stdout_log = tmp_path / "stdout.log"
+    stdout_log.write_bytes(b"x" * 2048)  # 2KB
+
+    truncate_fired = asyncio.Event()
+    ready_fired = asyncio.Event()
+
+    monitor = StdoutMonitor(
+        stdout_log=stdout_log,
+        silence_timeout=1.0,
+        on_ready=ready_fired.set,
+        poll_interval=0.1,
+        max_bytes=1024,  # 1KB
+        on_truncate=truncate_fired.set,
+    )
+    monitor.start()
+
+    await asyncio.wait_for(truncate_fired.wait(), timeout=3.0)
+    monitor.stop()
+
+    assert truncate_fired.is_set(), "on_truncate should have been called"
+    assert stdout_log.stat().st_size == 0, "stdout.log should be truncated to 0 bytes"
+
+
 async def test_t05_6_reset_restarts_silence_timer(tmp_path: Path):
     """T-05-6: StdoutMonitor.reset() restarts the silence timer; on_ready fires again.
 

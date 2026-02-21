@@ -13,13 +13,18 @@ dir           = "/tmp/ccmux"
 
 [timing]
 # Seconds of terminal inactivity required before auto-injection is allowed.
-idle_threshold   = 30
+idle_threshold   = 5
 # Seconds of stdout silence that signal Claude is ready for input.
 silence_timeout  = 3
 
 [mcp]
 # Port for the MCP SSE server. Binds to 127.0.0.1 only (loopback, not exposed to network).
 port = 9876
+
+[claude]
+# HTTP proxy for Claude API calls. Passed as HTTP_PROXY/HTTPS_PROXY to the
+# claude process in the tmux pane. ccmux itself does not use this proxy.
+proxy = "http://127.0.0.1:8118"
 
 [recovery]
 # Exponential backoff parameters for Claude process crash recovery.

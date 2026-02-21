@@ -30,11 +30,13 @@ class LifecycleManager:
         pane: libtmux.Pane,
         on_restart: Callable[[], None] | None = None,
         poll_interval: float = 2.0,
+        startup_grace: float = 10.0,
     ) -> None:
         self.config = config
         self.pane = pane
         self.on_restart = on_restart
         self._poll_interval = poll_interval
+        self._startup_grace = startup_grace
         # Restart count grows monotonically and is never reset.
         # If Claude ran stably for days then crashes again, the next backoff
         # immediately caps at backoff_cap. This is intentional: conservative
@@ -73,12 +75,13 @@ class LifecycleManager:
     def _get_claude_pid(self) -> int | None:
         """Get the PID of the claude process running in the pane, or None."""
         try:
-            # libtmux pane can give us the current command / pid
-            pane_pid = self.pane.pid
+            # pane.pid returns the tmux server PID, not the shell PID.
+            # Use #{pane_pid} format variable to get the actual shell PID.
+            result = self.pane.cmd("display-message", "-p", "#{pane_pid}")
+            pane_pid = int(result.stdout[0]) if result.stdout else None
             if pane_pid is None:
                 return None
             # Check if the child process in the pane is claude
-            # Use pgrep to find claude child of pane shell
             import subprocess
             result = subprocess.run(
                 ["pgrep", "-P", str(pane_pid), "claude"],
@@ -109,11 +112,14 @@ class LifecycleManager:
                 return True
             if last.endswith(("$", "%", "#")):
                 return False
-        except Exception:
-            pass
-        return True  # assume running if we can't determine
+        except Exception as e:
+            log.warning("capture-pane detection failed", extra={"error": str(e)})
+        return False  # fail-safe: triggers restart check (has exponential backoff)
 
     async def _monitor(self) -> None:
+        # Grace period: Claude takes several seconds to start. Skip checks
+        # during this window to avoid false crash detection on first launch.
+        await asyncio.sleep(self._startup_grace)
         while self._running:
             await asyncio.sleep(self._poll_interval)
             if not self._is_claude_running():

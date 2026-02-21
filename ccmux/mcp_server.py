@@ -81,7 +81,7 @@ async def run_server(
 
     If *ready_event* is provided it is set after the server has bound the port
     and is accepting connections.  This lets the daemon wait until the MCP
-    server is reachable before writing ``~/.claude.json``.
+    server is reachable before writing ``.mcp.json``.
     """
     import uvicorn
 

@@ -48,7 +48,7 @@ async def test_T09_1_crash_detected_and_restarted(test_config, caplog):
 
     test_config.backoff_initial = 0.1
     test_config.backoff_cap = 10
-    mgr = LifecycleManager(test_config, pane, on_restart=on_restart, poll_interval=0.2)
+    mgr = LifecycleManager(test_config, pane, on_restart=on_restart, poll_interval=0.2, startup_grace=0)
     # Replace _is_claude_running so the test controls crash timing
     mgr._is_claude_running = lambda: alive[0]
 
@@ -83,7 +83,7 @@ async def test_T09_2_restart_uses_continue_cmd(test_config):
     test_config.backoff_initial = 0.1
     test_config.backoff_cap = 10
     test_config.claude_proxy = "http://127.0.0.1:8118"
-    mgr = LifecycleManager(test_config, pane, on_restart=on_restart, poll_interval=0.2)
+    mgr = LifecycleManager(test_config, pane, on_restart=on_restart, poll_interval=0.2, startup_grace=0)
     mgr._is_claude_running = lambda: alive[0]
 
     mgr.start()
@@ -140,6 +140,30 @@ async def test_T09_3_exponential_backoff(test_config):
         assert actual <= exp * 2.0 + 0.5, (
             f"backoff {actual:.3f}s too long; expected ≤ {exp * 2.0 + 0.5:.3f}s"
         )
+
+
+async def test_is_claude_running_returns_false_on_total_failure(test_config):
+    """P1-1: _is_claude_running() returns False when both pgrep and capture-pane fail.
+
+    Uses a _BrokenPane where pid=None and cmd() raises. Verifies the fail-safe
+    default (False) instead of the old True (which caused zombie risk).
+    """
+    class _BrokenPane:
+        @property
+        def pid(self):
+            return None
+
+        def cmd(self, *args):
+            raise RuntimeError("pane destroyed")
+
+        def send_keys(self, cmd: str, enter: bool = True, **kwargs):
+            pass
+
+    pane = _BrokenPane()
+    mgr = LifecycleManager(test_config, pane, poll_interval=0.1)
+    assert mgr._is_claude_running() is False, (
+        "_is_claude_running should return False when both detection methods fail"
+    )
 
 
 async def test_T09_4_backoff_cap(test_config):

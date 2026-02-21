@@ -8,7 +8,6 @@ SP-02 verified:
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from enum import Enum
 from pathlib import Path
@@ -77,11 +76,15 @@ class StdoutMonitor:
         silence_timeout: float,
         on_ready: Callable[[], None],
         poll_interval: float = 0.3,
+        max_bytes: int = 0,
+        on_truncate: Callable[[], None] | None = None,
     ) -> None:
         self.stdout_log = stdout_log
         self.silence_timeout = silence_timeout
         self.on_ready = on_ready
         self.poll_interval = poll_interval
+        self.max_bytes = max_bytes  # 0 = no limit
+        self.on_truncate = on_truncate
         self._last_mtime: float = 0.0
         self._silence_start: float | None = None
         self._fired: bool = False  # has on_ready been called since last reset?
@@ -111,10 +114,21 @@ class StdoutMonitor:
         while True:
             await asyncio.sleep(self.poll_interval)
             try:
-                mtime = self.stdout_log.stat().st_mtime
+                st = self.stdout_log.stat()
             except FileNotFoundError:
                 continue
 
+            # Size-based truncation: clear file and re-mount pipe-pane
+            if self.max_bytes > 0 and st.st_size > self.max_bytes:
+                try:
+                    self.stdout_log.write_bytes(b"")
+                except OSError:
+                    pass
+                if self.on_truncate:
+                    self.on_truncate()
+                continue
+
+            mtime = st.st_mtime
             now = time.time()
             if mtime != self._last_mtime:
                 # stdout activity detected

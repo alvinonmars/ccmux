@@ -144,6 +144,7 @@ async def test_T10_2_crash_recovery_logging(test_config, caplog):
     test_config.backoff_cap = 10
     mgr = LifecycleManager(
         test_config, pane, on_restart=restart_event.set, poll_interval=0.2,
+        startup_grace=0,
     )
     mgr._is_claude_running = lambda: alive[0]
 

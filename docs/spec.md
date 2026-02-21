@@ -170,7 +170,7 @@ Adapters create their own FIFOs on startup; the daemon auto-discovers them via i
 | tmux injector | `tmux send-keys -l 'content'` + `tmux send-keys Enter` to inject text into the Claude pane (two steps, SP-04 verified) |
 | Ready detector | Determines whether Claude Code is waiting for input |
 | MCP server | Provides the `send_to_channel` tool to Claude Code |
-| Transcript watcher | inotify on transcript JSONL tail; reads and broadcasts new lines (**fallback**: used when Stop hook fails) |
+| Transcript watcher | inotify on transcript JSONL tail; reads and broadcasts new lines (**deferred**: hook.py error logging (P0-2) addresses the diagnostics gap) |
 | Output pub/sub | Maintains subscriber list, broadcasts complete turns |
 | Lifecycle manager | Monitors Claude Code process, restarts with exponential backoff on crash |
 | Terminal activity detector | Reads `#{client_activity}` via `tmux display-message`; returns last interactive client keyboard timestamp; server-wide scope |
@@ -199,7 +199,7 @@ Full flow when ccmux starts (or restarts):
 
 ```
 1. Environment check: verify HTTP_PROXY/HTTPS_PROXY point to local proxy (default http://127.0.0.1:8118)
-2. Hook installation: write/update the hooks field in ~/.claude/settings.json (idempotent, preserves other fields)
+2. Hook installation: write/update the hooks field in project-level .claude/settings.json (idempotent, preserves other fields)
 3. MCP server start: start on a fixed socket path (no PID or random suffix)
 4. MCP config write: write MCP server address into Claude Code config
 5. tmux session handling:
@@ -211,7 +211,7 @@ Full flow when ccmux starts (or restarts):
 
 ### Hook Management
 
-ccmux installs the following hook events (written to the `hooks` field in `~/.claude/settings.json`):
+ccmux installs the following hook events (written to the `hooks` field in `<project_root>/.claude/settings.json`):
 
 | Event | ccmux usage |
 |-------|------------|
@@ -235,7 +235,7 @@ Hook format (correct nested format, verified by SP-05):
 }
 ```
 
-Hook script path: `<project_root>/ccmux/hook.py`. ccmux resolves its own absolute path at startup and writes it into `~/.claude/settings.json`.
+Hook script path: `<project_root>/ccmux/hook.py`. ccmux resolves its own absolute path at startup and writes it into `<project_root>/.claude/settings.json`.
 
 ### Claude Ready Detection
 
@@ -284,7 +284,7 @@ The ccmux daemon runs as an MCP server, ready before Claude Code starts. See the
 
 **Address**: `http://127.0.0.1:<port>` (default port: `9876`). Binds to loopback only — never reachable from the network. HTTPS is unnecessary for loopback traffic and would add certificate management complexity with no real security benefit.
 
-**Claude Code config**: written to `~/.claude.json` under `mcpServers`:
+**Claude Code config**: written to `<project_root>/.mcp.json` under `mcpServers`:
 
 ```json
 {
@@ -412,7 +412,7 @@ proxy = ""               # HTTP proxy URL passed only to the claude invocation.
 
 **tmux session name**: `ccmux-{project.name}`. Multiple ccmux instances for different projects co-exist without collision.
 
-**Hook script path**: `<project_root>/ccmux/hook.py`. On startup, ccmux writes the resolved absolute path of this file into `~/.claude/settings.json`. The script itself lives in the project and is committed; only the path reference in settings.json is machine-specific.
+**Hook script path**: `<project_root>/ccmux/hook.py`. On startup, ccmux writes the resolved absolute path of this file into `<project_root>/.claude/settings.json`. The script itself lives in the project and is committed; only the path reference in settings.json is machine-specific.
 
 ---
 
@@ -463,7 +463,7 @@ proxy = ""               # HTTP proxy URL passed only to the claude invocation.
   Filter by `message.role == "assistant"`, take the last line, read `message.content` array.
 - **Thinking block**: did not appear in `-p` mode (no extended thinking); field name inferred from API docs as `"thinking"` — treat as optional in implementation (no error if absent)
 
-> ✅ Design confirmed (SP-05 interactive test): Stop hook fires **per turn**. Original plan (stop hook → broadcast) works as-is. inotify transcript watcher is the fallback.
+> ✅ Design confirmed (SP-05 interactive test): Stop hook fires **per turn**. Original plan (stop hook → broadcast) works as-is. Transcript watcher is **deferred**; hook.py error logging (P0-2) provides failure diagnostics.
 
 ### SP-02 Findings (Claude ready detection)
 
@@ -526,3 +526,4 @@ proxy = ""               # HTTP proxy URL passed only to the claude invocation.
 2. System prompt (CLAUDE.md): define Claude's behavior conventions in the ccmux environment (channel awareness, tool usage timing)
 3. Reliable delivery: application-layer implementation using SQLite to track delivery status
 4. Session continuity: improve context continuation mechanism in conjunction with CLAUDE.md
+5. Transcript watcher: inotify on transcript JSONL as fallback when Stop hook fails; deferred because hook.py error logging (P0-2) addresses the diagnostics gap
