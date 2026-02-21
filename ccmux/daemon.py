@@ -462,7 +462,7 @@ def _proxy_env_prefix(cfg: Config) -> str:
     """
     proxy = cfg.claude_proxy
     if proxy:
-        return f"HTTP_PROXY={proxy} HTTPS_PROXY={proxy} "
+        return f"HTTP_PROXY={proxy} HTTPS_PROXY={proxy} NO_PROXY=localhost,127.0.0.1 "
     return ""
 
 

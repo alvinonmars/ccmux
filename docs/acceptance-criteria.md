@@ -433,13 +433,46 @@ _This section is the single source of truth for development progress. Update it 
 | Iter-6 | AC-07 mock complete + AC-10 logging + lifecycle restart bug | 80 tests passing (+5) | T-07-2/3: thinking + tool_use block passthrough via crafted transcripts; T-10-1: injection flow log order (receive→ready→inject→broadcast) with field assertions; T-10-2: crash recovery log fields (restart_count, backoff_seconds); T-10-3: error-level log on injection failure; lifecycle.py `_build_restart_cmd()` includes proxy env vars + CCMUX_CONTROL_SOCK. **Closure fixes**: AC-10 spec text order corrected; AC-10 crash event field updated (pid→restart_count); AC-07 ts fallback masking removed. 2 closure rounds, 2 consecutive clean. |
 | Iter-7a | Production readiness: P0/P1 fixes + AC-12 + E2E smoke | 89 tests passing (+9) | **P0-2**: hook.py `_log_error()` replaces silent `except: pass` — writes JSONL to `hook_errors.log` + stderr, self-truncates at 100KB (3 tests). **P0-1**: `stdout_log_max_bytes` config + `StdoutMonitor` truncation + pipe-pane remount callback (1 test). **P1-1**: `_is_claude_running()` fail-safe changed from `return True` to `return False` + warning log (1 test). **P1-2**: transcript watcher deferred in spec.md; known issue added. **P1-3**: AC-12 T-12-1/2/3 (daemon re-attach, injection, broadcast after restart). **P1-4**: E2E mock smoke test (full chain: FIFO→queue→inject→hook→broadcast). |
 
+| Iter-7b | AC-00 + AC-11 + real_claude pass | 87 tests (mock) + real_claude pass | Code cleanup, live-test bug fixes, project-level config migration |
+| Iter-8 | WhatsApp integration: wa-notifier + whatsapp-mcp validation | 120 tests passing (+33) | See Iter-8 findings below |
+
+### Iter-8: WhatsApp Integration Findings (2026-02-21)
+
+**Architecture**: Hybrid — whatsapp-mcp (external MCP server) gives Claude direct WhatsApp tools, wa-notifier (our code, ~300 lines) polls bridge's SQLite and writes push notifications to ccmux FIFO.
+
+**Critical issues found & fixed**:
+
+1. **HTTP_PROXY breaks whatsapp-mcp write operations** — ccmux sets `HTTP_PROXY` for Claude API access. Claude spawns whatsapp-mcp as child MCP server, which inherits the proxy env. Python `requests` routes `localhost:8080` bridge calls through the proxy, causing HTTP 500. **Fix**: `NO_PROXY=localhost,127.0.0.1` added to proxy env prefix in `daemon.py` and `lifecycle.py`.
+
+2. **Timestamp format (3 iterations to fix)** — Go bridge stores `time.Time` as `"2026-02-21 16:14:59+08:00"` (space separator, TZ offset). Initially used `int`, then ISO with `T` separator, finally `_init_last_seen()` reads `max(timestamp)` from DB directly. **Lesson**: never generate timestamps for comparison with external sources.
+
+3. **SQLite column name** — bridge uses `content` not `body`. Caught in security audit before runtime.
+
+4. **SQLite WAL mode** — required for concurrent read (notifier) + write (bridge). Patched bridge connection string.
+
+**whatsapp-mcp capability validation** (live, 2026-02-21):
+
+| Tool | Type | Status | Notes |
+|------|------|--------|-------|
+| search_contacts | Read (SQLite) | PASS | |
+| list_chats | Read (SQLite) | PASS | |
+| list_messages | Read (SQLite) | PASS | |
+| send_message | Write (HTTP) | PASS | Requires NO_PROXY fix |
+| send_file | Write (HTTP) | PASS | Requires NO_PROXY fix |
+| send_audio_message | Write (HTTP) | PASS | Requires ffmpeg (`~/bin/ffmpeg`) |
+| download_media | Write (HTTP) | PASS | Requires NO_PROXY fix |
+
+**Security**: Bridge HTTP API patched to bind `127.0.0.1` only. Known accepted risks: arbitrary file read via `send_file`, prompt injection via incoming messages.
+
+**Operational**: Bridge syncs ~4500 history messages on first link; `_init_last_seen()` skips all. Bridge must run before notifier. ffmpeg installed as static binary to `~/bin/`.
+
 ### Pending
 
 _Each iteration is complete only when both its mock and real_claude tests pass. real_claude tests run manually at each iteration milestone (marked `@pytest.mark.real_claude`, skipped in CI)._
 
 | # | Scope | Mock tests | real_claude tests | Notes |
 |---|-------|-----------|-------------------|-------|
-| 7b | AC-00 + AC-11 remaining + all real_claude | T-00-2~4, T-11-3, T-12-4 | T-00-1 (fresh start); T-07-2/3 (format verification); T-08-1~3 (MCP tool call) | Final iteration, closes all ACs |
+| 8-E2E | Full pipeline: ccmux + wa-notifier + whatsapp-mcp live | Manual checklist | Claude receives [whatsapp] notification, calls list_messages, replies via send_message | Requires bridge + notifier + ccmux all running |
 
 ### Known Issues (carry-forward)
 

@@ -44,9 +44,15 @@ def load(project_root: Path | None = None) -> WANotifierConfig:
             "Set it to the whatsapp-mcp SQLite database path."
         )
 
+    poll_interval = wa.get("poll_interval", 30)
+    if poll_interval < 1:
+        raise ValueError(
+            "ccmux.toml [whatsapp] poll_interval must be >= 1 second."
+        )
+
     return WANotifierConfig(
         db_path=Path(db_path_str),
-        poll_interval=wa.get("poll_interval", 30),
+        poll_interval=poll_interval,
         allowed_chats=wa.get("allowed_chats", []),
         ignore_groups=wa.get("ignore_groups", True),
         runtime_dir=Path(runtime.get("dir", "/tmp/ccmux")),

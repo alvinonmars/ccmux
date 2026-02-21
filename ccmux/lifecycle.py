@@ -67,7 +67,7 @@ class LifecycleManager:
         parts: list[str] = []
         proxy = self.config.claude_proxy
         if proxy:
-            parts.append(f"HTTP_PROXY={proxy} HTTPS_PROXY={proxy}")
+            parts.append(f"HTTP_PROXY={proxy} HTTPS_PROXY={proxy} NO_PROXY=localhost,127.0.0.1")
         parts.append(f"CCMUX_CONTROL_SOCK={self.config.control_sock}")
         parts.append(_CLAUDE_BASE_CMD)
         return " ".join(parts)

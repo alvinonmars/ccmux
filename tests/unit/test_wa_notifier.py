@@ -74,6 +74,16 @@ class TestConfig:
         with pytest.raises(ValueError, match="db_path is required"):
             load_config(project_root=tmp_path)
 
+    def test_load_zero_poll_interval_raises(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "messages.db"
+        db_path.touch()
+        toml_path = tmp_path / "ccmux.toml"
+        toml_path.write_text(
+            f'[whatsapp]\ndb_path = "{db_path}"\npoll_interval = 0\n'
+        )
+        with pytest.raises(ValueError, match="poll_interval must be >= 1"):
+            load_config(project_root=tmp_path)
+
 
 # ---------------------------------------------------------------------------
 # Helper: create a test SQLite database matching whatsapp-mcp schema
