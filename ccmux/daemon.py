@@ -294,6 +294,10 @@ class Daemon:
             channel=msg.channel,
             content_len=len(msg.content),
         )
+        # Trigger injection immediately — if Claude is idle and ready,
+        # _maybe_inject will inject now instead of waiting for the next
+        # silence timeout (which won't fire if it already fired once).
+        asyncio.get_event_loop().create_task(self._maybe_inject())
 
     def _on_fifo_add(self, path: Path) -> None:
         """Called when a new input FIFO is detected by the directory watcher."""

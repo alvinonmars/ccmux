@@ -98,17 +98,13 @@ async def test_T12_2_injection_after_daemon_init(
     os.write(fd, (msg_data + "\n").encode())
     os.close(fd)
 
-    await asyncio.sleep(0.3)  # let FIFO reader process
+    await asyncio.sleep(0.5)  # let FIFO reader process + auto-inject
 
-    assert len(d._message_queue) > 0, "message should be queued after FIFO write"
-
-    # Inject
-    await d._maybe_inject()
-
-    assert len(d._message_queue) == 0, "queue should be drained after injection"
+    # _on_message triggers _maybe_inject immediately, so the queue
+    # should already be drained by the time we check.
+    assert len(d._message_queue) == 0, "queue should be drained by auto-injection"
 
     # Verify text visible in pane
-    await asyncio.sleep(0.2)
     capture = bare_pane.cmd("capture-pane", "-p").stdout
     text = "\n".join(capture) if isinstance(capture, list) else capture
     assert "restart-inject-test" in text, (

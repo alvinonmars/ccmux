@@ -474,6 +474,12 @@ _Each iteration is complete only when both its mock and real_claude tests pass. 
 |---|-------|-----------|-------------------|-------|
 | 8-E2E | Full pipeline: ccmux + wa-notifier + whatsapp-mcp live | Manual checklist | Claude receives [whatsapp] notification, calls list_messages, replies via send_message | Requires bridge + notifier + ccmux all running |
 
+### Backlog
+
+| Item | Notes |
+|------|-------|
+| Voice message transcription | Claude cannot process audio. Need STT component (faster-whisper local or Whisper API). Flow: download_media → ffmpeg → STT → text. Deferred. |
+
 ### Known Issues (carry-forward)
 
 | File | Issue | Affects |

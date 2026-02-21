@@ -134,7 +134,7 @@ async def test_T10_1_full_injection_flow_logging(
     assert "subscriber_count" in broadcast
 
 
-async def test_T10_2_crash_recovery_logging(test_config, caplog):
+async def test_T10_2_crash_recovery_logging(test_config, capsys):
     """T-10-2: crash + restart logs contain restart_count and backoff_seconds."""
     pane = _FakePane()
     alive = [True]
@@ -151,23 +151,25 @@ async def test_T10_2_crash_recovery_logging(test_config, caplog):
     mgr.start()
     await asyncio.sleep(0.4)
 
-    with caplog.at_level(logging.DEBUG, logger="ccmux.lifecycle"):
-        alive[0] = False  # simulate crash
-        await asyncio.wait_for(restart_event.wait(), timeout=3.0)
+    alive[0] = False  # simulate crash
+    await asyncio.wait_for(restart_event.wait(), timeout=3.0)
 
     mgr.stop()
 
+    # Lifecycle now uses structlog → JSON to stdout
+    captured = capsys.readouterr()
+    lines = [l for l in captured.out.splitlines() if l.strip()]
+
     # Crash detection log
-    crash = [r for r in caplog.records if "claude process died" in r.message]
+    crash = [l for l in lines if "claude process died" in l]
     assert crash, "missing crash detection log"
-    assert hasattr(crash[0], "restart_count")
+    assert "restart_count" in crash[0]
 
     # Restart log with backoff_seconds
-    restart = [r for r in caplog.records if "restarting claude" in r.message]
+    restart = [l for l in lines if "restarting claude" in l]
     assert restart, "missing restart log"
-    assert hasattr(restart[0], "restart_count")
-    assert hasattr(restart[0], "backoff_seconds")
-    assert restart[0].backoff_seconds >= 0
+    assert "restart_count" in restart[0]
+    assert "backoff_seconds" in restart[0]
 
 
 async def test_T10_3_injection_failure_error_log(

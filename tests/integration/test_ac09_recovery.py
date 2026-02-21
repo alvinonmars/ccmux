@@ -9,7 +9,6 @@ Tests:
   T-09-4: backoff saturates at backoff_cap after enough restarts
 """
 import asyncio
-import logging
 import time
 from unittest.mock import patch
 
@@ -37,7 +36,7 @@ class _FakePane:
         return R()
 
 
-async def test_T09_1_crash_detected_and_restarted(test_config, caplog):
+async def test_T09_1_crash_detected_and_restarted(test_config, capsys):
     """T-09-1: crash detected within poll_interval + backoff window; log recorded."""
     pane = _FakePane()
     alive = [True]
@@ -55,15 +54,15 @@ async def test_T09_1_crash_detected_and_restarted(test_config, caplog):
     mgr.start()
     await asyncio.sleep(0.4)  # let one poll cycle observe alive=True
 
-    with caplog.at_level(logging.WARNING, logger="ccmux.lifecycle"):
-        alive[0] = False  # simulate crash
-        # Expected: next poll (≤0.2s) detects crash, then backoff (0.1s) → on_restart
-        await asyncio.wait_for(restart_event.wait(), timeout=3.0)
+    alive[0] = False  # simulate crash
+    # Expected: next poll (≤0.2s) detects crash, then backoff (0.1s) → on_restart
+    await asyncio.wait_for(restart_event.wait(), timeout=3.0)
 
     mgr.stop()
 
     assert restart_event.is_set()
-    assert any("claude process died" in r.message for r in caplog.records)
+    captured = capsys.readouterr()
+    assert "claude process died" in captured.out
     assert pane.sent_keys, "restart command should have been sent to pane"
 
 

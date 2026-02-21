@@ -45,18 +45,11 @@ async def test_e2e_full_chain(
     os.write(fd, (msg_data + "\n").encode())
     os.close(fd)
 
-    await asyncio.sleep(0.3)  # let FIFO reader process
+    await asyncio.sleep(0.5)  # let FIFO reader process + auto-inject
 
-    # 3. Verify daemon queued it
-    assert len(d._message_queue) > 0, "message should be queued after FIFO write"
-    assert d._message_queue[0].channel == "telegram"
-
-    # 4. Simulate StdoutMonitor silence timeout → triggers _maybe_inject
-    d._on_silence_ready()
-    await asyncio.sleep(0.3)  # let inject task run
-
-    # 5. Verify queue drained, text in pane
-    assert len(d._message_queue) == 0, "queue should be drained after silence ready"
+    # 3. _on_message triggers _maybe_inject immediately, so the queue
+    #    should already be drained and the text injected into the pane.
+    assert len(d._message_queue) == 0, "queue should be drained by auto-injection"
 
     capture = bare_pane.cmd("capture-pane", "-p").stdout
     text = "\n".join(capture) if isinstance(capture, list) else capture

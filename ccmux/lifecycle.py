@@ -6,14 +6,14 @@ with exponential backoff on crash.
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Callable
 
 import libtmux
+import structlog
 
 from ccmux.config import Config
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 _CLAUDE_BASE_CMD = "claude --dangerously-skip-permissions --continue"
 
@@ -113,7 +113,7 @@ class LifecycleManager:
             if last.endswith(("$", "%", "#")):
                 return False
         except Exception as e:
-            log.warning("capture-pane detection failed", extra={"error": str(e)})
+            log.warning("capture-pane detection failed", error=str(e))
         return False  # fail-safe: triggers restart check (has exponential backoff)
 
     async def _monitor(self) -> None:
@@ -121,13 +121,21 @@ class LifecycleManager:
         # during this window to avoid false crash detection on first launch.
         await asyncio.sleep(self._startup_grace)
         while self._running:
-            await asyncio.sleep(self._poll_interval)
-            if not self._is_claude_running():
-                log.warning(
-                    "claude process died, restarting",
-                    extra={"restart_count": self._restart_count},
-                )
-                await self._restart()
+            try:
+                await asyncio.sleep(self._poll_interval)
+                if not self._is_claude_running():
+                    log.warning(
+                        "claude process died, restarting",
+                        restart_count=self._restart_count,
+                    )
+                    await self._restart()
+                    # Post-restart grace: wait for Claude to initialize before
+                    # checking again, preventing false re-detection.
+                    await asyncio.sleep(self._startup_grace)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("lifecycle monitor error")
 
     async def _restart(self) -> None:
         backoff = min(
@@ -138,10 +146,8 @@ class LifecycleManager:
 
         log.info(
             "restarting claude",
-            extra={
-                "restart_count": self._restart_count,
-                "backoff_seconds": backoff,
-            },
+            restart_count=self._restart_count,
+            backoff_seconds=backoff,
         )
 
         await asyncio.sleep(backoff)
@@ -153,7 +159,7 @@ class LifecycleManager:
             cmd = self._build_restart_cmd()
             self.pane.send_keys(cmd, enter=True)
         except Exception as e:
-            log.error("failed to restart claude", extra={"error": str(e)})
+            log.error("failed to restart claude", error=str(e))
             return
 
         if self.on_restart:
