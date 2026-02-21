@@ -22,6 +22,9 @@ dev = [
     "pytest-cov",
 ]
 
+[tool.setuptools.packages.find]
+include = ["ccmux*", "adapters*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

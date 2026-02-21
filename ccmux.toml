@@ -5,7 +5,7 @@
 [project]
 # Used to form the tmux session name: ccmux-{name}
 # Defaults to the basename of the working directory if not set.
-name = "claude-code-hub"
+# name = "my-project"
 
 [runtime]
 # Directory for FIFOs and Unix sockets. Created on startup if absent.
@@ -24,7 +24,7 @@ port = 9876
 [claude]
 # HTTP proxy for Claude API calls. Passed as HTTP_PROXY/HTTPS_PROXY to the
 # claude process in the tmux pane. ccmux itself does not use this proxy.
-proxy = "http://127.0.0.1:8118"
+# proxy = "http://127.0.0.1:8118"
 
 [recovery]
 # Exponential backoff parameters for Claude process crash recovery.
@@ -33,7 +33,7 @@ backoff_cap     = 60   # maximum seconds between restart attempts
 
 [whatsapp]
 # Path to whatsapp-mcp's SQLite database (required for wa-notifier)
-db_path = "/home/user/Desktop/whatsapp-mcp/whatsapp-bridge/store/messages.db"
+# db_path = "/path/to/whatsapp-bridge/store/messages.db"
 # Polling interval in seconds
 poll_interval = 30
 # Only notify for messages from these chat IDs (empty = all chats)

@@ -435,6 +435,7 @@ _This section is the single source of truth for development progress. Update it 
 
 | Iter-7b | AC-00 + AC-11 + real_claude pass | 87 tests (mock) + real_claude pass | Code cleanup, live-test bug fixes, project-level config migration |
 | Iter-8 | WhatsApp integration: wa-notifier + whatsapp-mcp + E2E pipeline | 120 tests passing (+33) | See Iter-8 findings below |
+| Iter-9 | Deployment via systemd user services | No code changes | See Iter-9 findings below |
 
 ### Iter-8: WhatsApp Integration Findings (2026-02-21)
 
@@ -459,12 +460,12 @@ _This section is the single source of truth for development progress. Update it 
 | list_messages | Read (SQLite) | PASS | |
 | send_message | Write (HTTP) | PASS | Requires NO_PROXY fix |
 | send_file | Write (HTTP) | PASS | Requires NO_PROXY fix |
-| send_audio_message | Write (HTTP) | PASS | Requires ffmpeg (`~/bin/ffmpeg`) |
+| send_audio_message | Write (HTTP) | PASS | Requires ffmpeg in PATH |
 | download_media | Write (HTTP) | PASS | Requires NO_PROXY fix |
 
 **Security**: Bridge HTTP API patched to bind `127.0.0.1` only. Known accepted risks: arbitrary file read via `send_file`, prompt injection via incoming messages.
 
-**Operational**: Bridge syncs ~4500 history messages on first link; `_init_last_seen()` skips all. Bridge must run before notifier. ffmpeg installed as static binary to `~/bin/`.
+**Operational**: Bridge syncs ~4500 history messages on first link; `_init_last_seen()` skips all. Bridge must run before notifier. ffmpeg required for audio messages (install to any location in PATH).
 
 **E2E pipeline verification** (live, 2026-02-21):
 
@@ -474,15 +475,57 @@ _This section is the single source of truth for development progress. Update it 
 | daemon → injection | Check daemon log `injecting messages` | PASS | 5ms |
 | Claude sees notification | `tmux capture-pane` shows `[HH:MM whatsapp]` | PASS | immediate |
 | Claude calls `list_messages` | Claude autonomously invokes MCP tool | PASS | ~5s (LLM turn) |
-| Claude → `send_message` | Validated in previous session (contacta) | PASS | ~3s |
+| Claude → `send_message` | Validated in live test | PASS | ~3s |
 | wa-notifier → SQLite poll | Unit test + live poll log | PASS | 30s interval |
-| All 4 MCP servers connected | `/mcp` shows ccmux, whatsapp, futu-stock, google-calendar | PASS | — |
+| All MCP servers connected | `/mcp` shows ccmux + whatsapp + other configured servers | PASS | — |
 
 **Lifecycle fixes** (found during E2E):
 1. **lifecycle.py structlog migration** — used stdlib `logging` instead of `structlog`; messages appeared as plain text. Fixed.
 2. **Post-restart grace period** — after restart command, monitor re-checked in 2s before Claude finished starting (~10s). Added `await asyncio.sleep(startup_grace)` after restart.
 3. **Auto-inject on message receipt** — `StdoutMonitor._fired` prevents re-firing `on_ready` after first trigger. Messages arriving while Claude is idle were never injected. Fixed by calling `_maybe_inject()` in `_on_message()`.
 4. **Exception handling in `_monitor` task** — unhandled exceptions silently killed the asyncio task. Added try/except with CancelledError re-raise.
+
+### Iter-9: systemd Deployment Findings (2026-02-21)
+
+**Architecture**: 3-layer systemd user services with grouping target.
+
+```
+Layer 1: whatsapp-bridge.service  (external dep)
+Layer 2: ccmux.service            (After=bridge, Wants=bridge)
+Layer 3: ccmux-wa-notifier.service (After=ccmux, Requires=ccmux)
+Group:   ccmux.target             (WantedBy=default.target)
+```
+
+**Setup**:
+1. `loginctl enable-linger $USER` — services survive logout and start at boot
+2. `pyproject.toml` — added `[tool.setuptools.packages.find]` to include `adapters*` package (setuptools rejected flat-layout auto-discovery with multiple top-level packages)
+3. 4 unit files written to `~/.config/systemd/user/`
+
+**Key design decisions**:
+- `PATH` includes nvm node bin — daemon sends `claude` via tmux send-keys; pane inherits PATH
+- `TERM=xterm-256color` — tmux requires a terminal type when started without a TTY
+- `RestartSec=10` + `StartLimitBurst=10` for wa-notifier — bridge may not have created SQLite DB yet on cold boot
+- `Wants=` (not `Requires=`) for bridge — ccmux works without WhatsApp
+
+**Verification** (live, 2026-02-21):
+
+| Check | Status |
+|-------|--------|
+| `ccmux.target` active | PASS |
+| `whatsapp-bridge.service` active, WhatsApp connected | PASS |
+| `ccmux.service` active, daemon started | PASS |
+| `ccmux-wa-notifier.service` active, polling | PASS |
+| tmux session exists | PASS |
+| FIFO directory `/tmp/ccmux/` with `in`, `in.whatsapp`, `control.sock`, `output.sock` | PASS |
+| FIFO test message received by daemon | PASS |
+| journalctl logs accessible | PASS |
+
+**Operational commands**:
+```bash
+systemctl --user start/stop ccmux.target    # whole stack
+systemctl --user restart ccmux              # just daemon
+journalctl --user -u ccmux -f              # follow logs
+```
 
 ### Pending
 
