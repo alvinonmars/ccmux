@@ -434,7 +434,7 @@ _This section is the single source of truth for development progress. Update it 
 | Iter-7a | Production readiness: P0/P1 fixes + AC-12 + E2E smoke | 89 tests passing (+9) | **P0-2**: hook.py `_log_error()` replaces silent `except: pass` — writes JSONL to `hook_errors.log` + stderr, self-truncates at 100KB (3 tests). **P0-1**: `stdout_log_max_bytes` config + `StdoutMonitor` truncation + pipe-pane remount callback (1 test). **P1-1**: `_is_claude_running()` fail-safe changed from `return True` to `return False` + warning log (1 test). **P1-2**: transcript watcher deferred in spec.md; known issue added. **P1-3**: AC-12 T-12-1/2/3 (daemon re-attach, injection, broadcast after restart). **P1-4**: E2E mock smoke test (full chain: FIFO→queue→inject→hook→broadcast). |
 
 | Iter-7b | AC-00 + AC-11 + real_claude pass | 87 tests (mock) + real_claude pass | Code cleanup, live-test bug fixes, project-level config migration |
-| Iter-8 | WhatsApp integration: wa-notifier + whatsapp-mcp validation | 120 tests passing (+33) | See Iter-8 findings below |
+| Iter-8 | WhatsApp integration: wa-notifier + whatsapp-mcp + E2E pipeline | 120 tests passing (+33) | See Iter-8 findings below |
 
 ### Iter-8: WhatsApp Integration Findings (2026-02-21)
 
@@ -466,13 +466,29 @@ _This section is the single source of truth for development progress. Update it 
 
 **Operational**: Bridge syncs ~4500 history messages on first link; `_init_last_seen()` skips all. Bridge must run before notifier. ffmpeg installed as static binary to `~/bin/`.
 
+**E2E pipeline verification** (live, 2026-02-21):
+
+| Hop | Method | Status | Latency |
+|-----|--------|--------|---------|
+| FIFO → daemon receives | Write to `/tmp/ccmux/in`, check daemon log | PASS | <1ms |
+| daemon → injection | Check daemon log `injecting messages` | PASS | 5ms |
+| Claude sees notification | `tmux capture-pane` shows `[HH:MM whatsapp]` | PASS | immediate |
+| Claude calls `list_messages` | Claude autonomously invokes MCP tool | PASS | ~5s (LLM turn) |
+| Claude → `send_message` | Validated in previous session (contacta) | PASS | ~3s |
+| wa-notifier → SQLite poll | Unit test + live poll log | PASS | 30s interval |
+| All 4 MCP servers connected | `/mcp` shows ccmux, whatsapp, futu-stock, google-calendar | PASS | — |
+
+**Lifecycle fixes** (found during E2E):
+1. **lifecycle.py structlog migration** — used stdlib `logging` instead of `structlog`; messages appeared as plain text. Fixed.
+2. **Post-restart grace period** — after restart command, monitor re-checked in 2s before Claude finished starting (~10s). Added `await asyncio.sleep(startup_grace)` after restart.
+3. **Auto-inject on message receipt** — `StdoutMonitor._fired` prevents re-firing `on_ready` after first trigger. Messages arriving while Claude is idle were never injected. Fixed by calling `_maybe_inject()` in `_on_message()`.
+4. **Exception handling in `_monitor` task** — unhandled exceptions silently killed the asyncio task. Added try/except with CancelledError re-raise.
+
 ### Pending
 
 _Each iteration is complete only when both its mock and real_claude tests pass. real_claude tests run manually at each iteration milestone (marked `@pytest.mark.real_claude`, skipped in CI)._
 
-| # | Scope | Mock tests | real_claude tests | Notes |
-|---|-------|-----------|-------------------|-------|
-| 8-E2E | Full pipeline: ccmux + wa-notifier + whatsapp-mcp live | Manual checklist | Claude receives [whatsapp] notification, calls list_messages, replies via send_message | Requires bridge + notifier + ccmux all running |
+(No pending items.)
 
 ### Backlog
 
