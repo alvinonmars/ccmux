@@ -23,7 +23,7 @@ class State(Enum):
     PERMISSION = "permission"
 
 
-_PERMISSION_KEYWORDS = ("Yes", "No", "allow", "y/n", "Allow", "yes/no")
+_PERMISSION_KEYWORDS = ("Yes/No", "yes/no", "y/n", "Allow once", "Allow always")
 
 # SP-02 verified spinner chars. Excludes * and · (appear in normal text).
 _SPINNER_CHARS = frozenset("✻✶✽✢●")

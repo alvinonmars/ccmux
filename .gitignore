@@ -49,6 +49,9 @@ Thumbs.db
 .env
 .env.*
 
+# Runtime data (personal photos, receipts, client info, health logs)
+data/
+
 # Local config (contains machine-specific paths; copy from ccmux.toml.example)
 ccmux.toml
 # Discussion / scratch notes
