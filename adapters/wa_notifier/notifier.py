@@ -44,11 +44,14 @@ class WhatsAppNotifier:
         try:
             while self._running:
                 try:
-                    summaries, admin_msgs = self._query_new_messages()
+                    summaries, admin_msgs, new_ts = self._query_new_messages()
                     if admin_msgs:
                         self._write_admin_notification(admin_msgs)
                     if summaries:
                         self._write_notification(summaries)
+                    # Advance high-water mark only after successful delivery
+                    if new_ts:
+                        self.last_seen_ts = new_ts
                 except sqlite3.Error as exc:
                     log.warning("SQLite query failed: %s", exc)
                 except OSError as exc:
@@ -105,7 +108,7 @@ class WhatsAppNotifier:
         except OSError as exc:
             log.warning("Failed to remove FIFO: %s", exc)
 
-    def _query_new_messages(self) -> tuple[list[dict], list[dict]]:
+    def _query_new_messages(self) -> tuple[list[dict], list[dict], str]:
         """Query SQLite for messages newer than last_seen_ts.
 
         Returns (regular_summaries, admin_messages) where:
@@ -152,10 +155,11 @@ class WhatsAppNotifier:
             conn.close()
 
         if not rows:
-            return [], []
+            return [], [], ""
 
-        # Update last_seen to the newest message timestamp
-        self.last_seen_ts = max(row["timestamp"] for row in rows)
+        # Compute new high-water mark but do NOT advance yet —
+        # caller must commit only after successful delivery.
+        new_ts = max(row["timestamp"] for row in rows)
 
         # Separate admin self-chat messages from regular messages
         admin_msgs: list[dict] = []
@@ -198,7 +202,7 @@ class WhatsAppNotifier:
             content = row["content"] or ""
             chats[chat_id]["preview"] = content[:80]
 
-        return list(chats.values()), admin_msgs
+        return list(chats.values()), admin_msgs, new_ts
 
     def _write_notification(self, summaries: list[dict]) -> None:
         """Format and write notification to FIFO."""

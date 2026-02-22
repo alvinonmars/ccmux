@@ -169,9 +169,10 @@ class TestQueryNewMessages:
         _create_test_db(db_path)
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
-        regular, admin = n._query_new_messages()
+        regular, admin, new_ts = n._query_new_messages()
         assert regular == []
         assert admin == []
+        assert new_ts == ""
 
     def test_finds_new_messages(self, tmp_path: Path) -> None:
         db_path = tmp_path / "messages.db"
@@ -183,11 +184,12 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin = n._query_new_messages()
+        regular, admin, new_ts = n._query_new_messages()
         assert len(regular) == 1
         assert regular[0]["sender"] == "Alice"
         assert regular[0]["count"] == 1
         assert regular[0]["preview"] == "Hello!"
+        assert new_ts == _ts(10)
 
     def test_aggregates_by_chat(self, tmp_path: Path) -> None:
         db_path = tmp_path / "messages.db"
@@ -203,7 +205,7 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, _ = n._query_new_messages()
+        regular, _, _ = n._query_new_messages()
         assert len(regular) == 2
         alice = next(s for s in regular if s["sender"] == "Alice")
         assert alice["count"] == 2
@@ -219,7 +221,7 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin = n._query_new_messages()
+        regular, admin, _ = n._query_new_messages()
         assert regular == []
         assert admin == []
 
@@ -238,7 +240,7 @@ class TestQueryNewMessages:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, _ = n._query_new_messages()
+        regular, _, _ = n._query_new_messages()
         assert len(regular) == 1
         assert regular[0]["sender"] == "Alice"
 
@@ -256,7 +258,7 @@ class TestQueryNewMessages:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, _ = n._query_new_messages()
+        regular, _, _ = n._query_new_messages()
         assert len(regular) == 1
         assert regular[0]["sender"] == "Alice"
 
@@ -272,10 +274,11 @@ class TestQueryNewMessages:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, _ = n._query_new_messages()
+        regular, _, _ = n._query_new_messages()
         assert len(regular) == 1
 
-    def test_updates_last_seen_ts(self, tmp_path: Path) -> None:
+    def test_returns_new_ts(self, tmp_path: Path) -> None:
+        """_query_new_messages returns new high-water mark without advancing it."""
         db_path = tmp_path / "messages.db"
         _create_test_db(db_path)
         _insert_messages(db_path, [
@@ -287,8 +290,10 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        n._query_new_messages()
-        assert n.last_seen_ts == _ts(50)
+        _, _, new_ts = n._query_new_messages()
+        assert new_ts == _ts(50)
+        # last_seen_ts must NOT be updated by _query_new_messages itself
+        assert n.last_seen_ts == _BEFORE_BASE
 
     def test_ignores_empty_content(self, tmp_path: Path) -> None:
         db_path = tmp_path / "messages.db"
@@ -300,7 +305,7 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin = n._query_new_messages()
+        regular, admin, _ = n._query_new_messages()
         assert regular == []
         assert admin == []
 
@@ -434,12 +439,15 @@ class TestNoDuplicateNotification:
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
 
-        first_regular, _ = n._query_new_messages()
+        first_regular, _, new_ts = n._query_new_messages()
         assert len(first_regular) == 1
+        # Caller commits high-water mark after successful delivery
+        n.last_seen_ts = new_ts
 
-        second_regular, second_admin = n._query_new_messages()
+        second_regular, second_admin, second_ts = n._query_new_messages()
         assert second_regular == []
         assert second_admin == []
+        assert second_ts == ""
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +640,7 @@ class TestInitLastSeen:
         n._init_last_seen()
 
         # All existing messages should be skipped
-        regular, admin = n._query_new_messages()
+        regular, admin, _ = n._query_new_messages()
         assert regular == []
         assert admin == []
 
@@ -641,7 +649,7 @@ class TestInitLastSeen:
             {"id": "new-1", "chat_jid": "a@s.whatsapp.net", "sender": "A",
              "content": "New!", "timestamp": _ts(30)},
         ])
-        regular, _ = n._query_new_messages()
+        regular, _, _ = n._query_new_messages()
         assert len(regular) == 1
         assert regular[0]["preview"] == "New!"
 
@@ -696,7 +704,7 @@ class TestAdminChat:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin = n._query_new_messages()
+        regular, admin, _ = n._query_new_messages()
         assert regular == []
         assert len(admin) == 1
         assert admin[0]["content"] == "hello claude"
@@ -715,7 +723,7 @@ class TestAdminChat:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin = n._query_new_messages()
+        regular, admin, _ = n._query_new_messages()
         assert regular == []
         assert admin == []
 
@@ -734,7 +742,7 @@ class TestAdminChat:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin = n._query_new_messages()
+        regular, admin, _ = n._query_new_messages()
         assert len(regular) == 1
         assert regular[0]["sender"] == "Alice"
         assert len(admin) == 1
@@ -751,7 +759,7 @@ class TestAdminChat:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin = n._query_new_messages()
+        regular, admin, _ = n._query_new_messages()
         assert regular == []
         assert admin == []
 
