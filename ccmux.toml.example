@@ -1,6 +1,7 @@
 # ccmux configuration
 # All values shown are defaults. Override as needed for your deployment.
-# This file is safe to commit — it contains no secrets or machine-specific paths.
+# Copy this file to ccmux.toml and customize for your deployment.
+# ccmux.toml is gitignored (contains machine-specific paths).
 
 [project]
 # Used to form the tmux session name: ccmux-{name}
@@ -34,9 +35,12 @@ backoff_cap     = 60   # maximum seconds between restart attempts
 [whatsapp]
 # Path to whatsapp-mcp's SQLite database (required for wa-notifier)
 # db_path = "/path/to/whatsapp-bridge/store/messages.db"
-# Polling interval in seconds
-poll_interval = 30
+# Polling interval in seconds (lower = faster chat response, higher = less I/O)
+poll_interval = 5
 # Only notify for messages from these chat IDs (empty = all chats)
 allowed_chats = []
 # Ignore group messages (only notify for 1:1 chats)
 ignore_groups = true
+# Admin JID for self-chat channel. Auto-detected from bridge device DB.
+# Override via CCMUX_WA_ADMIN_JID env var (phone number or full JID).
+# admin_jid = ""

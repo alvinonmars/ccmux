@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from adapters.wa_notifier.config import WANotifierConfig, load as load_config
+from adapters.wa_notifier.config import REPLY_PREFIX, WANotifierConfig, load as load_config
 from adapters.wa_notifier.notifier import WhatsAppNotifier
 from ccmux.fifo import parse_message
 
@@ -169,7 +169,9 @@ class TestQueryNewMessages:
         _create_test_db(db_path)
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
-        assert n._query_new_messages() == []
+        regular, admin = n._query_new_messages()
+        assert regular == []
+        assert admin == []
 
     def test_finds_new_messages(self, tmp_path: Path) -> None:
         db_path = tmp_path / "messages.db"
@@ -181,11 +183,11 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        result = n._query_new_messages()
-        assert len(result) == 1
-        assert result[0]["sender"] == "Alice"
-        assert result[0]["count"] == 1
-        assert result[0]["preview"] == "Hello!"
+        regular, admin = n._query_new_messages()
+        assert len(regular) == 1
+        assert regular[0]["sender"] == "Alice"
+        assert regular[0]["count"] == 1
+        assert regular[0]["preview"] == "Hello!"
 
     def test_aggregates_by_chat(self, tmp_path: Path) -> None:
         db_path = tmp_path / "messages.db"
@@ -201,9 +203,9 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        result = n._query_new_messages()
-        assert len(result) == 2
-        alice = next(s for s in result if s["sender"] == "Alice")
+        regular, _ = n._query_new_messages()
+        assert len(regular) == 2
+        alice = next(s for s in regular if s["sender"] == "Alice")
         assert alice["count"] == 2
         assert alice["preview"] == "Second"  # last message
 
@@ -217,7 +219,9 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        assert n._query_new_messages() == []
+        regular, admin = n._query_new_messages()
+        assert regular == []
+        assert admin == []
 
     def test_filters_by_allowed_chats(self, tmp_path: Path) -> None:
         db_path = tmp_path / "messages.db"
@@ -234,9 +238,9 @@ class TestQueryNewMessages:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        result = n._query_new_messages()
-        assert len(result) == 1
-        assert result[0]["sender"] == "Alice"
+        regular, _ = n._query_new_messages()
+        assert len(regular) == 1
+        assert regular[0]["sender"] == "Alice"
 
     def test_filters_groups(self, tmp_path: Path) -> None:
         db_path = tmp_path / "messages.db"
@@ -252,9 +256,9 @@ class TestQueryNewMessages:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        result = n._query_new_messages()
-        assert len(result) == 1
-        assert result[0]["sender"] == "Alice"
+        regular, _ = n._query_new_messages()
+        assert len(regular) == 1
+        assert regular[0]["sender"] == "Alice"
 
     def test_includes_groups_when_not_ignored(self, tmp_path: Path) -> None:
         db_path = tmp_path / "messages.db"
@@ -268,8 +272,8 @@ class TestQueryNewMessages:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        result = n._query_new_messages()
-        assert len(result) == 1
+        regular, _ = n._query_new_messages()
+        assert len(regular) == 1
 
     def test_updates_last_seen_ts(self, tmp_path: Path) -> None:
         db_path = tmp_path / "messages.db"
@@ -296,7 +300,9 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        assert n._query_new_messages() == []
+        regular, admin = n._query_new_messages()
+        assert regular == []
+        assert admin == []
 
 
 class TestWriteNotification:
@@ -428,11 +434,12 @@ class TestNoDuplicateNotification:
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
 
-        first = n._query_new_messages()
-        assert len(first) == 1
+        first_regular, _ = n._query_new_messages()
+        assert len(first_regular) == 1
 
-        second = n._query_new_messages()
-        assert second == []
+        second_regular, second_admin = n._query_new_messages()
+        assert second_regular == []
+        assert second_admin == []
 
 
 # ---------------------------------------------------------------------------
@@ -625,16 +632,18 @@ class TestInitLastSeen:
         n._init_last_seen()
 
         # All existing messages should be skipped
-        assert n._query_new_messages() == []
+        regular, admin = n._query_new_messages()
+        assert regular == []
+        assert admin == []
 
         # But a NEW message should be found
         _insert_messages(db_path, [
             {"id": "new-1", "chat_jid": "a@s.whatsapp.net", "sender": "A",
              "content": "New!", "timestamp": _ts(30)},
         ])
-        result = n._query_new_messages()
-        assert len(result) == 1
-        assert result[0]["preview"] == "New!"
+        regular, _ = n._query_new_messages()
+        assert len(regular) == 1
+        assert regular[0]["preview"] == "New!"
 
 
 # ---------------------------------------------------------------------------
@@ -662,5 +671,114 @@ class TestSingularPluralFormatting:
             data = os.read(read_fd, 4096).decode()
             assert "1 msg)" in data
             assert "1 msgs)" not in data
+        finally:
+            os.close(read_fd)
+
+
+# ---------------------------------------------------------------------------
+# Admin self-chat tests
+# ---------------------------------------------------------------------------
+
+ADMIN_JID = "30000000000@s.whatsapp.net"
+
+
+class TestAdminChat:
+    def test_admin_self_message_forwarded(self, tmp_path: Path) -> None:
+        """is_from_me=1 messages in admin chat should be returned as admin messages."""
+        db_path = tmp_path / "messages.db"
+        _create_test_db(db_path)
+        _insert_messages(db_path, [
+            {"chat_jid": ADMIN_JID, "sender": ADMIN_JID,
+             "content": "hello claude", "timestamp": _ts(10), "is_from_me": 1},
+        ])
+        cfg = WANotifierConfig(
+            db_path=db_path, runtime_dir=tmp_path, admin_jid=ADMIN_JID,
+        )
+        n = WhatsAppNotifier(cfg)
+        n.last_seen_ts = _BEFORE_BASE
+        regular, admin = n._query_new_messages()
+        assert regular == []
+        assert len(admin) == 1
+        assert admin[0]["content"] == "hello claude"
+
+    def test_admin_echo_filtered(self, tmp_path: Path) -> None:
+        """Messages prefixed with reply marker should be filtered (anti-echo)."""
+        db_path = tmp_path / "messages.db"
+        _create_test_db(db_path)
+        _insert_messages(db_path, [
+            {"chat_jid": ADMIN_JID, "sender": ADMIN_JID,
+             "content": f"{REPLY_PREFIX}I'm Claude, how can I help?",
+             "timestamp": _ts(10), "is_from_me": 1},
+        ])
+        cfg = WANotifierConfig(
+            db_path=db_path, runtime_dir=tmp_path, admin_jid=ADMIN_JID,
+        )
+        n = WhatsAppNotifier(cfg)
+        n.last_seen_ts = _BEFORE_BASE
+        regular, admin = n._query_new_messages()
+        assert regular == []
+        assert admin == []
+
+    def test_admin_and_regular_messages_separated(self, tmp_path: Path) -> None:
+        """Admin self-messages and regular messages are returned separately."""
+        db_path = tmp_path / "messages.db"
+        _create_test_db(db_path)
+        _insert_messages(db_path, [
+            {"chat_jid": ADMIN_JID, "sender": ADMIN_JID,
+             "content": "admin msg", "timestamp": _ts(10), "is_from_me": 1},
+            {"chat_jid": "other@s.whatsapp.net", "sender": "Alice",
+             "content": "regular msg", "timestamp": _ts(11), "is_from_me": 0},
+        ])
+        cfg = WANotifierConfig(
+            db_path=db_path, runtime_dir=tmp_path, admin_jid=ADMIN_JID,
+        )
+        n = WhatsAppNotifier(cfg)
+        n.last_seen_ts = _BEFORE_BASE
+        regular, admin = n._query_new_messages()
+        assert len(regular) == 1
+        assert regular[0]["sender"] == "Alice"
+        assert len(admin) == 1
+        assert admin[0]["content"] == "admin msg"
+
+    def test_no_admin_jid_ignores_own_messages(self, tmp_path: Path) -> None:
+        """Without admin_jid, is_from_me=1 messages are still filtered out."""
+        db_path = tmp_path / "messages.db"
+        _create_test_db(db_path)
+        _insert_messages(db_path, [
+            {"chat_jid": ADMIN_JID, "sender": ADMIN_JID,
+             "content": "hello", "timestamp": _ts(10), "is_from_me": 1},
+        ])
+        cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
+        n = WhatsAppNotifier(cfg)
+        n.last_seen_ts = _BEFORE_BASE
+        regular, admin = n._query_new_messages()
+        assert regular == []
+        assert admin == []
+
+    def test_admin_notification_full_content(self, tmp_path: Path) -> None:
+        """Admin notifications should include full message content, not summary."""
+        runtime = tmp_path / "rt"
+        runtime.mkdir()
+        fifo_path = runtime / "in.whatsapp"
+        os.mkfifo(str(fifo_path))
+
+        cfg = WANotifierConfig(
+            db_path=tmp_path / "messages.db", runtime_dir=runtime,
+            admin_jid=ADMIN_JID,
+        )
+        n = WhatsAppNotifier(cfg)
+
+        read_fd = os.open(str(fifo_path), os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            n._write_admin_notification([
+                {"content": "what time is it?", "timestamp": _ts(10)},
+            ])
+            data = os.read(read_fd, 4096).decode().strip()
+            payload = json.loads(data)
+            assert payload["channel"] == "whatsapp"
+            assert payload["content"] == "what time is it?"
+            # No summary format, no "list_messages" instruction
+            assert "list_messages" not in payload["content"]
+            assert "New WhatsApp" not in payload["content"]
         finally:
             os.close(read_fd)

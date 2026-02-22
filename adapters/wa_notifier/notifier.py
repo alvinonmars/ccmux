@@ -15,7 +15,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from adapters.wa_notifier.config import WANotifierConfig
+from adapters.wa_notifier.config import REPLY_PREFIX, WANotifierConfig
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +44,9 @@ class WhatsAppNotifier:
         try:
             while self._running:
                 try:
-                    summaries = self._query_new_messages()
+                    summaries, admin_msgs = self._query_new_messages()
+                    if admin_msgs:
+                        self._write_admin_notification(admin_msgs)
                     if summaries:
                         self._write_notification(summaries)
                 except sqlite3.Error as exc:
@@ -103,11 +105,14 @@ class WhatsAppNotifier:
         except OSError as exc:
             log.warning("Failed to remove FIFO: %s", exc)
 
-    def _query_new_messages(self) -> list[dict]:
+    def _query_new_messages(self) -> tuple[list[dict], list[dict]]:
         """Query SQLite for messages newer than last_seen_ts.
 
-        Returns a list of summary dicts: {chat_id, sender, count, preview}.
+        Returns (regular_summaries, admin_messages) where:
+        - regular_summaries: list of {chat_id, sender, count, preview}
+        - admin_messages: list of {content, timestamp} from admin self-chat
         """
+        admin_jid = self.cfg.admin_jid
         conn = sqlite3.connect(
             f"file:{self.cfg.db_path}?mode=ro",
             uri=True,
@@ -117,42 +122,70 @@ class WhatsAppNotifier:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
 
-            cur.execute(
-                """
-                SELECT chat_jid, sender, content, timestamp
-                FROM messages
-                WHERE timestamp > ?
-                  AND is_from_me = 0
-                  AND content != ''
-                ORDER BY timestamp ASC
-                """,
-                (self.last_seen_ts,),
-            )
+            # Include is_from_me=1 for admin self-chat
+            if admin_jid:
+                cur.execute(
+                    """
+                    SELECT chat_jid, sender, content, timestamp, is_from_me
+                    FROM messages
+                    WHERE timestamp > ?
+                      AND content != ''
+                      AND (is_from_me = 0 OR chat_jid = ?)
+                    ORDER BY timestamp ASC
+                    """,
+                    (self.last_seen_ts, admin_jid),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT chat_jid, sender, content, timestamp, is_from_me
+                    FROM messages
+                    WHERE timestamp > ?
+                      AND is_from_me = 0
+                      AND content != ''
+                    ORDER BY timestamp ASC
+                    """,
+                    (self.last_seen_ts,),
+                )
             rows = cur.fetchall()
         finally:
             conn.close()
 
         if not rows:
-            return []
+            return [], []
 
         # Update last_seen to the newest message timestamp
         self.last_seen_ts = max(row["timestamp"] for row in rows)
 
-        # Filter by allowed_chats
+        # Separate admin self-chat messages from regular messages
+        admin_msgs: list[dict] = []
+        regular_rows: list[sqlite3.Row] = []
+
+        for row in rows:
+            if admin_jid and row["chat_jid"] == admin_jid and row["is_from_me"] == 1:
+                content = row["content"] or ""
+                # Anti-echo: skip messages prefixed with reply marker (Claude's own replies)
+                if content.startswith(REPLY_PREFIX):
+                    continue
+                admin_msgs.append({
+                    "content": content,
+                    "timestamp": row["timestamp"],
+                })
+            elif row["is_from_me"] == 0:
+                regular_rows.append(row)
+
+        # Filter regular messages by allowed_chats
         if self.cfg.allowed_chats:
             allowed = set(self.cfg.allowed_chats)
-            rows = [r for r in rows if r["chat_jid"] in allowed]
+            regular_rows = [r for r in regular_rows if r["chat_jid"] in allowed]
 
         # Filter out group messages if configured
         if self.cfg.ignore_groups:
-            rows = [r for r in rows if not self._is_group_jid(r["chat_jid"])]
+            regular_rows = [r for r in regular_rows if not self._is_group_jid(r["chat_jid"])]
 
-        if not rows:
-            return []
-
-        # Aggregate by chat_jid
+        # Aggregate regular messages by chat_jid
         chats: dict[str, dict] = {}
-        for row in rows:
+        for row in regular_rows:
             chat_id = row["chat_jid"]
             if chat_id not in chats:
                 chats[chat_id] = {
@@ -162,11 +195,10 @@ class WhatsAppNotifier:
                     "preview": "",
                 }
             chats[chat_id]["count"] += 1
-            # Keep last message as preview (truncated)
             content = row["content"] or ""
             chats[chat_id]["preview"] = content[:80]
 
-        return list(chats.values())
+        return list(chats.values()), admin_msgs
 
     def _write_notification(self, summaries: list[dict]) -> None:
         """Format and write notification to FIFO."""
@@ -200,6 +232,21 @@ class WhatsAppNotifier:
             )
         finally:
             os.close(fd)
+
+    def _write_admin_notification(self, messages: list[dict]) -> None:
+        """Write admin self-chat messages directly to FIFO (full content, no summary)."""
+        for msg in messages:
+            payload = json.dumps({
+                "channel": "whatsapp",
+                "content": msg["content"],
+                "ts": int(time.time()),
+            })
+            fd = os.open(str(self._fifo_path), os.O_WRONLY | os.O_NONBLOCK)
+            try:
+                os.write(fd, (payload + "\n").encode())
+            finally:
+                os.close(fd)
+        log.info("Admin chat: forwarded %d message(s)", len(messages))
 
     @staticmethod
     def _is_group_jid(jid: str) -> bool:

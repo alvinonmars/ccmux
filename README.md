@@ -2,6 +2,14 @@
 
 A multiplexer for the Claude Code CLI. Wraps `claude` in a tmux session with standard Unix I/O interfaces so it can run 24/7 and accept input from multiple asynchronous sources (WhatsApp, Telegram, timers, etc.) while keeping the native terminal experience fully intact.
 
+## Why ccmux
+
+I'm a heavy Claude Code user. My philosophy: use the best model on the best engineering foundation. The model's capability sets the ceiling; the engineering infrastructure sets the floor. That's why I build my AI agents on top of Claude Code rather than raw API calls or thin wrappers.
+
+There's also a practical reason: the Anthropic API is expensive. Claude Code with a Claude Max subscription gives you the same Opus/Sonnet models at a flat rate — but only through the CLI, which assumes a human at the keyboard. ccmux removes that assumption.
+
+The goal: let Claude Code run natively (no API shim, no prompt wrapper, no capability loss) while gaining 24/7 heartbeat capability — always on, accepting input from any channel, surviving reboots, and auto-recovering from crashes. A persistent AI agent that uses the full Claude Code experience as its runtime.
+
 ## How It Works
 
 ```
@@ -43,7 +51,13 @@ This creates two entry points: `ccmux` (daemon) and `ccmux-wa-notifier` (WhatsAp
 
 ## Configuration
 
-Create `ccmux.toml` in the project root:
+Copy the example config and customize:
+
+```bash
+cp ccmux.toml.example ccmux.toml
+```
+
+`ccmux.toml` is gitignored (contains machine-specific paths). Edit it:
 
 ```toml
 [project]
