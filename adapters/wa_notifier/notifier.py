@@ -58,7 +58,11 @@ class WhatsAppNotifier:
                     log.warning("FIFO write failed: %s", exc)
                 await asyncio.sleep(self.cfg.poll_interval)
         finally:
-            self._cleanup_fifo()
+            # Do NOT call _cleanup_fifo() here. The FIFO is a reusable
+            # filesystem object in /tmp and ccmux keeps a reader fd on it.
+            # Deleting + recreating triggers a DirectoryWatcher race and
+            # leaves a window where ccmux has no reader registered.
+            pass
 
     def stop(self) -> None:
         """Signal the run loop to exit."""

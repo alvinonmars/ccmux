@@ -459,8 +459,7 @@ class TestRunLoop:
     async def test_run_survives_sqlite_error_and_stops_gracefully(
         self, tmp_path: Path,
     ) -> None:
-        """run() must not crash on a transient SQLite error and must
-        clean up the FIFO on shutdown."""
+        """run() must not crash on a transient SQLite error."""
         runtime = tmp_path / "rt"
         # Point to a non-existent db so every query raises sqlite3.Error
         cfg = WANotifierConfig(
@@ -478,11 +477,13 @@ class TestRunLoop:
         asyncio.get_event_loop().create_task(_stop_after_iterations())
         await n.run()
 
-        # FIFO must be cleaned up after run() exits
-        assert not (runtime / "in.whatsapp").exists()
+        # FIFO should persist after shutdown (reused across restarts)
+        assert (runtime / "in.whatsapp").exists()
 
-    async def test_run_creates_and_cleans_fifo(self, tmp_path: Path) -> None:
-        """run() creates FIFO on start and removes it on exit."""
+    async def test_run_creates_fifo_and_preserves_on_exit(
+        self, tmp_path: Path,
+    ) -> None:
+        """run() creates FIFO on start and preserves it on exit."""
         db_path = tmp_path / "messages.db"
         _create_test_db(db_path)
         runtime = tmp_path / "rt"
@@ -501,7 +502,8 @@ class TestRunLoop:
         asyncio.get_event_loop().create_task(_verify_and_stop())
         await n.run()
 
-        assert not fifo_path.exists()
+        # FIFO must persist — ccmux keeps a reader fd on it
+        assert fifo_path.exists()
 
 
 # ---------------------------------------------------------------------------
