@@ -185,10 +185,10 @@ async def test_T10_3_injection_failure_error_log(
     monkeypatch.setattr(d, "_get_client_activity_ts", lambda: 0)
 
     # Make injection fail
-    def _fail(*args, **kwargs):
+    async def _fail(*args, **kwargs):
         raise RuntimeError("simulated injection failure")
 
-    monkeypatch.setattr("ccmux.daemon.inject_messages", _fail)
+    monkeypatch.setattr("ccmux.daemon.async_inject_messages", _fail)
 
     d._message_queue.append(
         Message(channel="test", content="will fail", ts=int(time.time()))

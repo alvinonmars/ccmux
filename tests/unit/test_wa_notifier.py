@@ -149,10 +149,10 @@ def _insert_messages(path: Path, messages: list[dict]) -> None:
         msg_id = m.get("id", f"msg-{i}")
         conn.execute(
             "INSERT OR REPLACE INTO messages "
-            "(id, chat_jid, sender, content, timestamp, is_from_me) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(id, chat_jid, sender, content, timestamp, is_from_me, media_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (msg_id, m["chat_jid"], m["sender"], m["content"],
-             m["timestamp"], m.get("is_from_me", 0)),
+             m["timestamp"], m.get("is_from_me", 0), m.get("media_type")),
         )
     conn.commit()
     conn.close()
@@ -169,9 +169,10 @@ class TestQueryNewMessages:
         _create_test_db(db_path)
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
-        regular, admin, new_ts = n._query_new_messages()
+        regular, admin, classified, new_ts = n._query_new_messages()
         assert regular == []
         assert admin == []
+        assert classified == []
         assert new_ts == ""
 
     def test_finds_new_messages(self, tmp_path: Path) -> None:
@@ -184,7 +185,7 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin, new_ts = n._query_new_messages()
+        regular, admin, classified, new_ts = n._query_new_messages()
         assert len(regular) == 1
         assert regular[0]["sender"] == "Alice"
         assert regular[0]["count"] == 1
@@ -205,7 +206,7 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, _, _ = n._query_new_messages()
+        regular, _, _, _ = n._query_new_messages()
         assert len(regular) == 2
         alice = next(s for s in regular if s["sender"] == "Alice")
         assert alice["count"] == 2
@@ -221,7 +222,7 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin, _ = n._query_new_messages()
+        regular, admin, _, _ = n._query_new_messages()
         assert regular == []
         assert admin == []
 
@@ -240,7 +241,7 @@ class TestQueryNewMessages:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, _, _ = n._query_new_messages()
+        regular, _, _, _ = n._query_new_messages()
         assert len(regular) == 1
         assert regular[0]["sender"] == "Alice"
 
@@ -258,7 +259,7 @@ class TestQueryNewMessages:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, _, _ = n._query_new_messages()
+        regular, _, _, _ = n._query_new_messages()
         assert len(regular) == 1
         assert regular[0]["sender"] == "Alice"
 
@@ -274,7 +275,7 @@ class TestQueryNewMessages:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, _, _ = n._query_new_messages()
+        regular, _, _, _ = n._query_new_messages()
         assert len(regular) == 1
 
     def test_returns_new_ts(self, tmp_path: Path) -> None:
@@ -290,7 +291,7 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        _, _, new_ts = n._query_new_messages()
+        _, _, _, new_ts = n._query_new_messages()
         assert new_ts == _ts(50)
         # last_seen_ts must NOT be updated by _query_new_messages itself
         assert n.last_seen_ts == _BEFORE_BASE
@@ -305,7 +306,7 @@ class TestQueryNewMessages:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin, _ = n._query_new_messages()
+        regular, admin, _, _ = n._query_new_messages()
         assert regular == []
         assert admin == []
 
@@ -439,14 +440,15 @@ class TestNoDuplicateNotification:
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
 
-        first_regular, _, new_ts = n._query_new_messages()
+        first_regular, _, _, new_ts = n._query_new_messages()
         assert len(first_regular) == 1
         # Caller commits high-water mark after successful delivery
         n.last_seen_ts = new_ts
 
-        second_regular, second_admin, second_ts = n._query_new_messages()
+        second_regular, second_admin, second_classified, second_ts = n._query_new_messages()
         assert second_regular == []
         assert second_admin == []
+        assert second_classified == []
         assert second_ts == ""
 
 
@@ -642,7 +644,7 @@ class TestInitLastSeen:
         n._init_last_seen()
 
         # All existing messages should be skipped
-        regular, admin, _ = n._query_new_messages()
+        regular, admin, _, _ = n._query_new_messages()
         assert regular == []
         assert admin == []
 
@@ -651,7 +653,7 @@ class TestInitLastSeen:
             {"id": "new-1", "chat_jid": "a@s.whatsapp.net", "sender": "A",
              "content": "New!", "timestamp": _ts(30)},
         ])
-        regular, _, _ = n._query_new_messages()
+        regular, _, _, _ = n._query_new_messages()
         assert len(regular) == 1
         assert regular[0]["preview"] == "New!"
 
@@ -706,7 +708,7 @@ class TestAdminChat:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin, _ = n._query_new_messages()
+        regular, admin, _, _ = n._query_new_messages()
         assert regular == []
         assert len(admin) == 1
         assert admin[0]["content"] == "hello claude"
@@ -725,7 +727,7 @@ class TestAdminChat:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin, _ = n._query_new_messages()
+        regular, admin, _, _ = n._query_new_messages()
         assert regular == []
         assert admin == []
 
@@ -744,7 +746,7 @@ class TestAdminChat:
         )
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin, _ = n._query_new_messages()
+        regular, admin, _, _ = n._query_new_messages()
         assert len(regular) == 1
         assert regular[0]["sender"] == "Alice"
         assert len(admin) == 1
@@ -761,7 +763,7 @@ class TestAdminChat:
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
-        regular, admin, _ = n._query_new_messages()
+        regular, admin, _, _ = n._query_new_messages()
         assert regular == []
         assert admin == []
 
@@ -792,3 +794,143 @@ class TestAdminChat:
             assert "New WhatsApp" not in payload["content"]
         finally:
             os.close(read_fd)
+
+
+# ---------------------------------------------------------------------------
+# Intent classification: message separation
+# ---------------------------------------------------------------------------
+
+GROUP_JID = "100000000000000001@g.us"
+
+
+class TestClassifiedMessageSeparation:
+    def test_smart_classify_chat_goes_to_classified(self, tmp_path: Path) -> None:
+        """Messages from smart_classify_chats appear in classified_msgs, not summaries."""
+        db_path = tmp_path / "messages.db"
+        _create_test_db(db_path)
+        _insert_messages(db_path, [
+            {"chat_jid": GROUP_JID, "sender": "HelperA",
+             "content": "S3 hello", "timestamp": _ts(10)},
+        ])
+        cfg = WANotifierConfig(
+            db_path=db_path, runtime_dir=tmp_path,
+            classify_enabled=True, smart_classify_chats=[GROUP_JID],
+            ignore_groups=False,
+        )
+        n = WhatsAppNotifier(cfg)
+        n.last_seen_ts = _BEFORE_BASE
+        regular, admin, classified, _ = n._query_new_messages()
+        assert regular == []
+        assert admin == []
+        assert len(classified) == 1
+        assert classified[0]["sender"] == "HelperA"
+        assert classified[0]["content"] == "S3 hello"
+        assert classified[0]["chat_jid"] == GROUP_JID
+
+    def test_non_classify_chat_stays_in_regular(self, tmp_path: Path) -> None:
+        """Messages from non-classified chats stay in regular summaries."""
+        db_path = tmp_path / "messages.db"
+        _create_test_db(db_path)
+        _insert_messages(db_path, [
+            {"chat_jid": "other@s.whatsapp.net", "sender": "Alice",
+             "content": "Hi", "timestamp": _ts(10)},
+        ])
+        cfg = WANotifierConfig(
+            db_path=db_path, runtime_dir=tmp_path,
+            classify_enabled=True, smart_classify_chats=[GROUP_JID],
+        )
+        n = WhatsAppNotifier(cfg)
+        n.last_seen_ts = _BEFORE_BASE
+        regular, _, classified, _ = n._query_new_messages()
+        assert len(regular) == 1
+        assert classified == []
+
+    def test_mixed_classified_and_regular(self, tmp_path: Path) -> None:
+        """Both classified and regular messages returned correctly."""
+        db_path = tmp_path / "messages.db"
+        _create_test_db(db_path)
+        _insert_messages(db_path, [
+            {"chat_jid": GROUP_JID, "sender": "HelperA",
+             "content": "group msg", "timestamp": _ts(10)},
+            {"chat_jid": "bob@s.whatsapp.net", "sender": "Bob",
+             "content": "dm", "timestamp": _ts(11)},
+        ])
+        cfg = WANotifierConfig(
+            db_path=db_path, runtime_dir=tmp_path,
+            classify_enabled=True, smart_classify_chats=[GROUP_JID],
+            ignore_groups=False,
+        )
+        n = WhatsAppNotifier(cfg)
+        n.last_seen_ts = _BEFORE_BASE
+        regular, _, classified, _ = n._query_new_messages()
+        assert len(regular) == 1
+        assert regular[0]["sender"] == "Bob"
+        assert len(classified) == 1
+        assert classified[0]["sender"] == "HelperA"
+
+    def test_classify_disabled_no_separation(self, tmp_path: Path) -> None:
+        """When classify_enabled=False, no messages go to classified."""
+        db_path = tmp_path / "messages.db"
+        _create_test_db(db_path)
+        _insert_messages(db_path, [
+            {"chat_jid": GROUP_JID, "sender": "HelperA",
+             "content": "hello", "timestamp": _ts(10)},
+        ])
+        cfg = WANotifierConfig(
+            db_path=db_path, runtime_dir=tmp_path,
+            classify_enabled=False, smart_classify_chats=[GROUP_JID],
+            ignore_groups=False, allowed_chats=[GROUP_JID],
+        )
+        n = WhatsAppNotifier(cfg)
+        n.last_seen_ts = _BEFORE_BASE
+        regular, _, classified, _ = n._query_new_messages()
+        assert len(regular) == 1
+        assert classified == []
+
+    def test_classified_includes_media_type(self, tmp_path: Path) -> None:
+        """Classified messages include media_type field."""
+        db_path = tmp_path / "messages.db"
+        _create_test_db(db_path)
+        _insert_messages(db_path, [
+            {"chat_jid": GROUP_JID, "sender": "HelperA",
+             "content": "", "timestamp": _ts(10), "media_type": "image"},
+        ])
+        cfg = WANotifierConfig(
+            db_path=db_path, runtime_dir=tmp_path,
+            classify_enabled=True, smart_classify_chats=[GROUP_JID],
+            ignore_groups=False,
+        )
+        n = WhatsAppNotifier(cfg)
+        n.last_seen_ts = _BEFORE_BASE
+        _, _, classified, _ = n._query_new_messages()
+        assert len(classified) == 1
+        assert classified[0]["media_type"] == "image"
+
+
+# ---------------------------------------------------------------------------
+# Config loading: classify fields
+# ---------------------------------------------------------------------------
+
+
+class TestConfigClassifyFields:
+    def test_classify_disabled_by_default(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "messages.db"
+        db_path.touch()
+        toml_path = tmp_path / "ccmux.toml"
+        toml_path.write_text(f'[whatsapp]\ndb_path = "{db_path}"\n')
+        cfg = load_config(project_root=tmp_path)
+        assert cfg.classify_enabled is False
+        assert cfg.smart_classify_chats == []
+
+    def test_classify_enabled_from_toml(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "messages.db"
+        db_path.touch()
+        toml_path = tmp_path / "ccmux.toml"
+        toml_path.write_text(
+            f'[whatsapp]\ndb_path = "{db_path}"\n'
+            f'classify_enabled = true\n'
+            f'smart_classify_chats = ["group@g.us"]\n'
+        )
+        cfg = load_config(project_root=tmp_path)
+        assert cfg.classify_enabled is True
+        assert cfg.smart_classify_chats == ["group@g.us"]

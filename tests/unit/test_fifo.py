@@ -49,3 +49,42 @@ def test_parse_json_missing_ts_uses_current_time():
 def test_channel_from_in_dot_name():
     msg = parse_message("text", "in.telegram-bot")
     assert msg.channel == "telegram-bot"
+
+
+# ---------------------------------------------------------------------------
+# Intent metadata in JSON payloads
+# ---------------------------------------------------------------------------
+
+
+def test_parse_json_with_intent_metadata():
+    """JSON payload with intent fields produces Message.meta."""
+    line = (
+        '{"channel":"whatsapp","content":"test","ts":1700000000,'
+        '"intent":"receipt","intent_meta":{"confidence":0.9,"action":"respond"}}'
+    )
+    msg = parse_message(line, "in.whatsapp")
+    assert msg.channel == "whatsapp"
+    assert msg.content == "test"
+    assert msg.meta is not None
+    assert msg.meta["intent"] == "receipt"
+    assert msg.meta["intent_meta"]["confidence"] == 0.9
+
+
+def test_parse_json_without_intent_has_no_meta():
+    """JSON payload without intent fields has meta=None."""
+    line = '{"channel":"whatsapp","content":"hi","ts":1700000000}'
+    msg = parse_message(line, "in.whatsapp")
+    assert msg.meta is None
+
+
+def test_parse_plain_text_has_no_meta():
+    """Plain text messages always have meta=None."""
+    msg = parse_message("hello world", "in.telegram")
+    assert msg.meta is None
+
+
+def test_message_meta_default_is_none():
+    """Message.meta defaults to None (backward-compatible)."""
+    from ccmux.injector import Message
+    m = Message(channel="test", content="hi", ts=0)
+    assert m.meta is None

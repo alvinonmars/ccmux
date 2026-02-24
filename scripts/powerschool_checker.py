@@ -536,14 +536,18 @@ def run_checker(force: bool = False) -> None:
             json.dump(new_assignments, fh, indent=2, ensure_ascii=False)
         print(f"  Assignments JSON saved: {assignments_path}")
 
-        # Update dedup state
-        mark_seen(assignments, state)
-        save_state(state)
-        print(f"  State updated: {STATE_FILE}")
-
         # ---- Step 9: Notify ccmux ------------------------------------------
         print("[9/9] Notifying ccmux ...")
-        notify_ccmux(new_assignments, screenshot_path, text_path)
+        notified = notify_ccmux(new_assignments, screenshot_path, text_path)
+
+        # Update dedup state only after successful notification
+        # (prevents permanent notification loss on FIFO failure)
+        if notified:
+            mark_seen(assignments, state)
+            save_state(state)
+            print(f"  State updated: {STATE_FILE}")
+        else:
+            print(f"  WARNING: State NOT updated — will retry on next run")
 
         browser.close()
 

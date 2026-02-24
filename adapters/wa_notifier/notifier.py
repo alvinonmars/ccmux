@@ -31,22 +31,38 @@ class WhatsAppNotifier:
         self._fifo_path: Path = cfg.runtime_dir / FIFO_NAME
         self._running = False
 
+        # Intent classification (local heuristics only, no API calls)
+        self._classifier = None
+        self._smart_classify_chats: set[str] = set()
+        if cfg.classify_enabled and cfg.smart_classify_chats:
+            self._smart_classify_chats = set(cfg.smart_classify_chats)
+            from adapters.wa_notifier.classifier import IntentClassifier
+            self._classifier = IntentClassifier()
+            log.info(
+                "Intent classifier enabled for %d chat(s)",
+                len(self._smart_classify_chats),
+            )
+
     async def run(self) -> None:
         """Main loop: create FIFO, poll SQLite, write notifications."""
         self._ensure_fifo()
         self._init_last_seen()
         self._running = True
         log.info(
-            "WhatsApp notifier started: db=%s poll=%ds fifo=%s last_seen=%s",
+            "WhatsApp notifier started: db=%s poll=%ds fifo=%s last_seen=%s classify=%s",
             self.cfg.db_path, self.cfg.poll_interval, self._fifo_path,
-            self.last_seen_ts,
+            self.last_seen_ts, bool(self._classifier),
         )
         try:
             while self._running:
                 try:
-                    summaries, admin_msgs, new_ts = self._query_new_messages()
+                    summaries, admin_msgs, classified_msgs, new_ts = (
+                        self._query_new_messages()
+                    )
                     if admin_msgs:
                         self._write_admin_notification(admin_msgs)
+                    if classified_msgs:
+                        self._classify_and_write(classified_msgs)
                     if summaries:
                         self._write_notification(summaries)
                     # Advance high-water mark only after successful delivery
@@ -112,12 +128,16 @@ class WhatsAppNotifier:
         except OSError as exc:
             log.warning("Failed to remove FIFO: %s", exc)
 
-    def _query_new_messages(self) -> tuple[list[dict], list[dict], str]:
+    def _query_new_messages(
+        self,
+    ) -> tuple[list[dict], list[dict], list[dict], str]:
         """Query SQLite for messages newer than last_seen_ts.
 
-        Returns (regular_summaries, admin_messages) where:
+        Returns (regular_summaries, admin_messages, classified_messages, new_ts):
         - regular_summaries: list of {chat_id, sender, count, preview}
         - admin_messages: list of {content, timestamp} from admin self-chat
+        - classified_messages: individual rows from smart_classify_chats
+        - new_ts: new high-water mark timestamp (or "" if no messages)
         """
         admin_jid = self.cfg.admin_jid
         conn = sqlite3.connect(
@@ -129,27 +149,38 @@ class WhatsAppNotifier:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
 
-            # Include is_from_me=1 for admin self-chat
-            if admin_jid:
+            # Include is_from_me=1 for admin self-chat AND allowed group chats
+            # (so admin's messages in monitored groups are picked up too)
+            allowed_set = set(self.cfg.allowed_chats) if self.cfg.allowed_chats else set()
+            include_from_me = {admin_jid} if admin_jid else set()
+            include_from_me |= allowed_set
+            # Also include smart_classify_chats so their is_from_me messages
+            # are picked up (for echo filtering in Claude)
+            include_from_me |= self._smart_classify_chats
+
+            if include_from_me:
+                placeholders = ",".join("?" for _ in include_from_me)
                 cur.execute(
-                    """
-                    SELECT chat_jid, sender, content, timestamp, is_from_me
+                    f"""
+                    SELECT chat_jid, sender, content, timestamp, is_from_me,
+                           media_type
                     FROM messages
                     WHERE timestamp > ?
-                      AND content != ''
-                      AND (is_from_me = 0 OR chat_jid = ?)
+                      AND (content != '' OR media_type IS NOT NULL)
+                      AND (is_from_me = 0 OR chat_jid IN ({placeholders}))
                     ORDER BY timestamp ASC
                     """,
-                    (self.last_seen_ts, admin_jid),
+                    (self.last_seen_ts, *include_from_me),
                 )
             else:
                 cur.execute(
                     """
-                    SELECT chat_jid, sender, content, timestamp, is_from_me
+                    SELECT chat_jid, sender, content, timestamp, is_from_me,
+                           media_type
                     FROM messages
                     WHERE timestamp > ?
                       AND is_from_me = 0
-                      AND content != ''
+                      AND (content != '' OR media_type IS NOT NULL)
                     ORDER BY timestamp ASC
                     """,
                     (self.last_seen_ts,),
@@ -159,7 +190,7 @@ class WhatsAppNotifier:
             conn.close()
 
         if not rows:
-            return [], [], ""
+            return [], [], [], ""
 
         # Compute new high-water mark but do NOT advance yet —
         # caller must commit only after successful delivery.
@@ -169,27 +200,69 @@ class WhatsAppNotifier:
         admin_msgs: list[dict] = []
         regular_rows: list[sqlite3.Row] = []
 
+        allowed_group_set = set(self.cfg.allowed_chats) if self.cfg.allowed_chats else set()
+
         for row in rows:
-            if admin_jid and row["chat_jid"] == admin_jid and row["is_from_me"] == 1:
-                content = row["content"] or ""
-                # Anti-echo: skip messages prefixed with reply marker (Claude's own replies)
+            chat_jid = row["chat_jid"]
+            is_from_me = row["is_from_me"] == 1
+            content = row["content"] or ""
+
+            if admin_jid and chat_jid == admin_jid and is_from_me:
+                # Admin self-chat: forward full content (skip bot's own replies)
                 if content.startswith(REPLY_PREFIX):
                     continue
+                media_type = (
+                    row["media_type"] if "media_type" in row.keys() else None
+                )
+                # For media-only messages, describe the media type
+                fwd_content = content
+                if not fwd_content and media_type:
+                    fwd_content = f"[{media_type}]"
                 admin_msgs.append({
-                    "content": content,
+                    "content": fwd_content,
                     "timestamp": row["timestamp"],
+                    "media_type": media_type,
                 })
-            elif row["is_from_me"] == 0:
+            elif chat_jid in allowed_group_set or chat_jid in self._smart_classify_chats:
+                # Monitored groups: include ALL messages without filtering.
+                # Echo handling is done by Claude (it knows what it sent).
+                regular_rows.append(row)
+            elif not is_from_me:
                 regular_rows.append(row)
 
         # Filter regular messages by allowed_chats
         if self.cfg.allowed_chats:
-            allowed = set(self.cfg.allowed_chats)
+            allowed = set(self.cfg.allowed_chats) | self._smart_classify_chats
             regular_rows = [r for r in regular_rows if r["chat_jid"] in allowed]
 
         # Filter out group messages if configured
         if self.cfg.ignore_groups:
-            regular_rows = [r for r in regular_rows if not self._is_group_jid(r["chat_jid"])]
+            # Never filter out smart_classify_chats — they're groups we monitor
+            regular_rows = [
+                r for r in regular_rows
+                if not self._is_group_jid(r["chat_jid"])
+                or r["chat_jid"] in self._smart_classify_chats
+            ]
+
+        # Separate messages for smart classification from regular aggregation
+        classified_msgs: list[dict] = []
+        if self._smart_classify_chats:
+            remaining: list[sqlite3.Row] = []
+            for r in regular_rows:
+                if r["chat_jid"] in self._smart_classify_chats:
+                    media_type = (
+                        r["media_type"] if "media_type" in r.keys() else None
+                    )
+                    classified_msgs.append({
+                        "chat_jid": r["chat_jid"],
+                        "sender": r["sender"] or r["chat_jid"],
+                        "content": r["content"] or "",
+                        "timestamp": r["timestamp"],
+                        "media_type": media_type,
+                    })
+                else:
+                    remaining.append(r)
+            regular_rows = remaining
 
         # Aggregate regular messages by chat_jid
         chats: dict[str, dict] = {}
@@ -204,9 +277,94 @@ class WhatsAppNotifier:
                 }
             chats[chat_id]["count"] += 1
             content = row["content"] or ""
+            media_type = row["media_type"] if "media_type" in row.keys() else None
+            if not content and media_type:
+                content = f"[{media_type}]"
             chats[chat_id]["preview"] = content[:80]
 
-        return list(chats.values()), admin_msgs, new_ts
+        return list(chats.values()), admin_msgs, classified_msgs, new_ts
+
+    def _classify_and_write(self, messages: list[dict]) -> None:
+        """Classify each message and write non-silent ones to FIFO."""
+        from adapters.wa_notifier.classifier import SILENT_INTENTS
+
+        for msg in messages:
+            text = msg.get("content", "")
+            sender = msg.get("sender", "")
+            media_type = msg.get("media_type")
+            chat_jid = msg.get("chat_jid", "")
+            has_media = bool(media_type)
+
+            if self._classifier:
+                result = self._classifier.classify(
+                    text, sender, has_media, media_type, chat_jid,
+                )
+            else:
+                # Classifier not available — pass everything through as unknown
+                from adapters.wa_notifier.classifier import (
+                    ClassificationResult,
+                    Intent,
+                )
+                result = ClassificationResult(
+                    Intent.UNKNOWN, 0.0, "Classifier unavailable", "respond",
+                )
+
+            if result.intent in SILENT_INTENTS:
+                log.info(
+                    "Classified as silent: %s (sender=%s)",
+                    result.intent.value, sender,
+                )
+                continue
+
+            self._write_classified_notification(msg, result)
+
+    def _write_classified_notification(
+        self, msg: dict, result: "ClassificationResult",
+    ) -> None:
+        """Write a single classified message to FIFO with intent metadata."""
+        from adapters.wa_notifier.classifier import ClassificationResult
+
+        content = msg.get("content", "")
+        media_type = msg.get("media_type")
+        sender = msg.get("sender", "")
+
+        if not content and media_type:
+            content = f"[{media_type}]"
+
+        # Build human-readable description for Claude
+        description = (
+            f"Household group message [intent: {result.intent.value}] "
+            f"from {sender}: {content[:80]}"
+        )
+        if result.intent.value != "s3_command":
+            description += "\nUse list_messages to read full details."
+
+        payload = json.dumps({
+            "channel": "whatsapp",
+            "content": description,
+            "ts": int(time.time()),
+            "intent": result.intent.value,
+            "intent_meta": {
+                "confidence": result.confidence,
+                "reasoning": result.reasoning,
+                "action": result.action,
+                "chat_jid": msg.get("chat_jid", ""),
+                "sender": sender,
+                "original_content": msg.get("content", ""),
+                "media_type": media_type,
+            },
+        })
+
+        # O_WRONLY | O_NONBLOCK: don't block if no reader yet
+        fd = os.open(str(self._fifo_path), os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            os.write(fd, (payload + "\n").encode())
+            log.info(
+                "Classified notification: intent=%s sender=%s",
+                result.intent.value, sender,
+            )
+        finally:
+            os.close(fd)
 
     def _write_notification(self, summaries: list[dict]) -> None:
         """Format and write notification to FIFO."""

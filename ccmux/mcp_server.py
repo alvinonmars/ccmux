@@ -76,12 +76,16 @@ async def run_server(
     host: str,
     port: int,
     ready_event: asyncio.Event | None = None,
+    shutdown_event: asyncio.Event | None = None,
 ) -> None:
-    """Run the MCP SSE server (blocks until cancelled).
+    """Run the MCP SSE server (blocks until shutdown_event is set or cancelled).
 
     If *ready_event* is provided it is set after the server has bound the port
     and is accepting connections.  This lets the daemon wait until the MCP
     server is reachable before writing ``.mcp.json``.
+
+    If *shutdown_event* is provided, the server exits its main loop when the
+    event is set, enabling graceful shutdown from the daemon.
     """
     import uvicorn
 
@@ -103,5 +107,13 @@ async def run_server(
         ready_event.set()
     if server.should_exit:
         return
+
+    # Watch for external shutdown signal
+    if shutdown_event is not None:
+        async def _watch_shutdown() -> None:
+            await shutdown_event.wait()
+            server.should_exit = True
+        asyncio.create_task(_watch_shutdown())
+
     await server.main_loop()
     await server.shutdown()

@@ -28,7 +28,7 @@ from ccmux.config import Config
 from ccmux.detector import ReadyDetector, State, StdoutMonitor
 from ccmux.fifo import FifoManager, Message
 from ccmux.hooks_manager import install as install_hooks
-from ccmux.injector import inject_messages
+from ccmux.injector import InjectionTimeout, async_inject_messages
 from ccmux.lifecycle import LifecycleManager
 from ccmux.mcp_server import create_server, run_server
 from ccmux.pubsub import ControlServer, OutputBroadcaster
@@ -83,7 +83,7 @@ class Daemon:
         _configure_logging(self.cfg.runtime_dir)
         self.cfg.runtime_dir.mkdir(parents=True, exist_ok=True)
 
-        _warn_proxy()
+        _warn_proxy(self.cfg)
 
         install_hooks(self.cfg)
         log.info("hooks installed", hook_script=str(self.cfg.hook_script))
@@ -372,10 +372,13 @@ class Daemon:
 
         log.info("injecting messages", message_count=len(messages))
         try:
-            inject_messages(self._pane, messages)
+            await async_inject_messages(self._pane, messages)
+        except InjectionTimeout:
+            log.error("injection timed out: tmux send-keys hung, re-queuing")
+            self._message_queue[:0] = messages
+            self._schedule_retry()
         except Exception as e:
             log.error("injection failed", error=str(e))
-            # Put messages back
             self._message_queue[:0] = messages
 
     def _schedule_retry(self) -> None:
@@ -470,10 +473,10 @@ def _proxy_env_prefix(cfg: Config) -> str:
     return ""
 
 
-def _warn_proxy() -> None:
-    """Warn if HTTP proxy env vars are not set."""
-    if not (os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")):
-        log.warning("HTTP_PROXY/HTTPS_PROXY not set; Claude may not connect")
+def _warn_proxy(cfg: Config) -> None:
+    """Warn if no proxy is configured for the claude invocation."""
+    if not cfg.claude_proxy:
+        log.warning("claude_proxy not set (ccmux.toml [claude].proxy); Claude may not connect")
 
 
 def _write_mcp_config(cfg: Config) -> None:
@@ -505,16 +508,24 @@ def _write_mcp_config(cfg: Config) -> None:
 async def _run_daemon_and_mcp(cfg: Config) -> None:
     """Run the daemon alongside the MCP server."""
     mcp_ready = asyncio.Event()
+    mcp_shutdown = asyncio.Event()
     daemon = Daemon(cfg, mcp_ready=mcp_ready)
     mcp = create_server(cfg.runtime_dir)
 
-    async with asyncio.TaskGroup() as tg:
-        tg.create_task(
-            run_server(
-                mcp, host="127.0.0.1", port=cfg.mcp_port, ready_event=mcp_ready
-            )
+    mcp_task = asyncio.create_task(
+        run_server(
+            mcp,
+            host="127.0.0.1",
+            port=cfg.mcp_port,
+            ready_event=mcp_ready,
+            shutdown_event=mcp_shutdown,
         )
-        tg.create_task(daemon.run())
+    )
+    try:
+        await daemon.run()
+    finally:
+        mcp_shutdown.set()
+        await mcp_task
 
 
 def main() -> None:

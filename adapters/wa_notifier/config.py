@@ -30,6 +30,8 @@ class WANotifierConfig:
     ignore_groups: bool = True
     runtime_dir: Path = Path("/tmp/ccmux")
     admin_jid: str = ""  # self-chat JID for admin channel; auto-detected or env override
+    classify_enabled: bool = False  # master switch for intent classification
+    smart_classify_chats: list[str] = field(default_factory=list)  # JIDs that use classification
 
 
 def load(project_root: Path | None = None) -> WANotifierConfig:
@@ -68,6 +70,8 @@ def load(project_root: Path | None = None) -> WANotifierConfig:
         ignore_groups=wa.get("ignore_groups", True),
         runtime_dir=Path(runtime.get("dir", "/tmp/ccmux")),
         admin_jid=admin_jid,
+        classify_enabled=wa.get("classify_enabled", False),
+        smart_classify_chats=wa.get("smart_classify_chats", []),
     )
 
 

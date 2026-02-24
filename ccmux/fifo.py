@@ -31,7 +31,14 @@ def parse_message(line: str, fifo_name: str) -> Message:
             channel = data.get("channel") or _channel_from_name(fifo_name)
             content = data.get("content", stripped)
             ts = int(data.get("ts") or time.time())
-            return Message(channel=channel, content=content, ts=ts)
+            # Extract intent classification metadata if present
+            meta = None
+            if "intent" in data:
+                meta = {
+                    "intent": data["intent"],
+                    "intent_meta": data.get("intent_meta", {}),
+                }
+            return Message(channel=channel, content=content, ts=ts, meta=meta)
         except (json.JSONDecodeError, ValueError):
             pass
     # Plain text fallback
