@@ -6,6 +6,59 @@
 
 A multiplexer for the Claude Code CLI. Wraps `claude` in a tmux session with standard Unix I/O interfaces so it can run 24/7 and accept input from multiple asynchronous sources (WhatsApp, Telegram, timers, etc.) while keeping the native terminal experience fully intact.
 
+## Privacy Gate — MANDATORY
+
+> **This project processes personal and family data paths. Every commit MUST pass a two-layer privacy gate. No exceptions.**
+
+### How it works
+
+**Layer 1 — Regex scan (automatic):** The pre-commit hook runs `scripts/privacy_check.py` which scans all staged changes against:
+- Generic PII patterns: phone numbers, WhatsApp JIDs, email addresses, credentials, home paths
+- Personal blocklist: names, domains, and custom patterns from `~/.ccmux/secrets/privacy_blocklist.txt` (gitignored)
+
+**Layer 2 — AI review token (manual):** After the regex scan passes, 3 independent Claude Code agents review the staged diff from different perspectives (Identity, Secrets, Context). All 3 must pass before a one-time review token is generated. The pre-commit hook verifies this token — **no token = commit blocked**.
+
+### Setup (required for all contributors)
+
+```bash
+# 1. Activate the pre-commit hook
+git config core.hooksPath hooks
+
+# 2. Create your personal blocklist
+mkdir -p ~/.ccmux/secrets
+cat > ~/.ccmux/secrets/privacy_blocklist.txt << 'EOF'
+# Add names, paths, domains, or any string that must never appear in a commit
+# One pattern per line, matched case-insensitively as word boundaries
+EOF
+```
+
+### Commit workflow
+
+```bash
+git add <files>
+
+# Run the privacy scanner + AI review to generate a token
+python scripts/privacy_check.py --generate-token
+
+# Commit (hook verifies the token automatically)
+git commit -m "your message"
+```
+
+If the hook blocks your commit, it will print the exact matches found. Fix them and retry. **Never bypass the hook** (`--no-verify` is not allowed).
+
+### History
+
+The entire git history has been cleaned with `git filter-repo` to remove all PII. Maintaining a clean history is a hard requirement — the privacy gate exists to ensure no PII is ever re-introduced.
+
+### Quick reference
+
+| Command | Purpose |
+|---------|---------|
+| `python scripts/privacy_check.py` | Scan staged changes only |
+| `python scripts/privacy_check.py --all` | Full repo scan |
+| `python scripts/privacy_check.py --generate-token` | AI review + generate commit token |
+| `python scripts/privacy_check.py --review` | Print staged diff for manual review |
+
 ## Why ccmux
 
 I'm a heavy Claude Code user. My philosophy: use the best model on the best engineering foundation. The model's capability sets the ceiling; the engineering infrastructure sets the floor. That's why I build my AI agents on top of Claude Code rather than raw API calls or thin wrappers.
@@ -59,9 +112,7 @@ git config core.hooksPath hooks    # activate pre-commit privacy scanner
 ```
 
 This creates two entry points: `ccmux` (daemon) and `ccmux-wa-notifier` (WhatsApp adapter).
-The `core.hooksPath` line activates the two-layer pre-commit privacy gate:
-- **Layer 1 (regex):** Blocks commits containing PII patterns (phone numbers, JIDs, credentials) + personal patterns from `~/.ccmux/secrets/privacy_blocklist.txt`.
-- **Layer 2 (AI review token):** Requires a one-time review token (generated after AI review passes) before any commit is accepted. See `scripts/privacy_check.py --help` for details.
+The `core.hooksPath` line activates the two-layer pre-commit privacy gate — see [Privacy Gate](#privacy-gate--mandatory) above.
 
 ## Configuration
 
@@ -496,3 +547,15 @@ This gives you the native Claude Code experience. Your keyboard activity suppres
 ```
 
 See `docs/spec.md` for architecture details and `docs/acceptance-criteria.md` for test coverage.
+
+## Disclaimer
+
+This is a personal project built for the author's own use. It is provided as-is, with no warranty of any kind, express or implied.
+
+- **No guarantee of correctness, reliability, or fitness for any particular purpose.** The software may contain bugs, break without notice, or behave unexpectedly.
+- **You are solely responsible** for any consequences of running this software, including but not limited to data loss, privacy exposure, or system damage.
+- **This project processes personal and family data.** If you fork or adapt it, you are responsible for your own data privacy and compliance with applicable laws (GDPR, PDPO, etc.).
+- **No support is provided.** Issues and PRs may be ignored or closed without explanation.
+- **The author is not liable** for any direct, indirect, incidental, or consequential damages arising from the use of this software.
+
+Use at your own risk.
