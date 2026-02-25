@@ -1,7 +1,7 @@
 """PowerSchool ADFS SSO login for BrowserSession.
 
 Extracted from scripts/powerschool_checker.py.
-Credentials loaded from ~/.secrets/powerschool.env.
+Credentials loaded from ~/.ccmux/secrets/powerschool.env.
 """
 
 from __future__ import annotations
@@ -13,11 +13,15 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from ccmux.paths import POWERSCHOOL_ENV
 from libs.web_agent.browser import BrowserSession
 
 log = logging.getLogger(__name__)
 
-ENV_FILE = Path.home() / ".secrets" / "powerschool.env"
+ENV_FILE = POWERSCHOOL_ENV
 
 
 def load_credentials(env_path: Path = ENV_FILE) -> dict[str, str]:

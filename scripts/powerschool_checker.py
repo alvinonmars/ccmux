@@ -6,7 +6,7 @@ Logs into PowerSchool guardian portal via ADFS SSO, navigates to the
 "Classes and Home Learning" page, parses the homework table, detects
 new assignments via deduplication state, and notifies ccmux via FIFO.
 
-Credentials: ~/.secrets/powerschool.env
+Credentials: ~/.ccmux/secrets/powerschool.env
 Must be run with xvfb-run on headless Linux:
     xvfb-run .venv/bin/python3 scripts/powerschool_checker.py
 
@@ -33,9 +33,9 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from ccmux.paths import HOMEWORK_DIR
+from ccmux.paths import HOMEWORK_DIR, POWERSCHOOL_ENV
 
-ENV_FILE = Path.home() / ".secrets" / "powerschool.env"
+ENV_FILE = POWERSCHOOL_ENV
 CHILD_NAME = os.environ.get("PS_CHILD_NAME", "Child")
 SCHOOL_CODE = os.environ.get("PS_SCHOOL_CODE", "school")
 CHILD_DIR = os.environ.get("PS_CHILD_DIR", "child")

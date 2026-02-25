@@ -51,6 +51,10 @@ EMAIL_SCAN_DIR = TMP_DIR / "email_scan"
 # Security audit
 SECURITY_AUDIT_DIR = DATA_ROOT / "security_audit"
 
+# --- Secrets sub-paths -------------------------------------------------------
+
+POWERSCHOOL_ENV = SECRETS_ROOT / "powerschool.env"
+
 
 def ensure_dirs() -> None:
     """Create all standard data directories if they don't exist."""
