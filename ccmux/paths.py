@@ -47,6 +47,7 @@ HOMEWORK_DIR = HOUSEHOLD_DIR / "homework"
 # Temporary / working files (screenshots, scan results)
 TMP_DIR = HOUSEHOLD_DIR / "tmp"
 EMAIL_SCAN_DIR = TMP_DIR / "email_scan"
+GMAIL_SCAN_DIR = TMP_DIR / "gmail_scan"
 
 # Security audit
 SECURITY_AUDIT_DIR = DATA_ROOT / "security_audit"
@@ -71,6 +72,7 @@ def ensure_dirs() -> None:
         HOMEWORK_DIR,
         TMP_DIR,
         EMAIL_SCAN_DIR,
+        GMAIL_SCAN_DIR,
         SECURITY_AUDIT_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)
