@@ -39,7 +39,24 @@ ccmux's core scope is **message multiplexing** (daemon, FIFO, injector, adapters
 | Extended capabilities | `libs/<module>/` | web_agent, image_processor |
 | Standalone scripts | `scripts/` | daily_butler, health_reminder |
 
-**Git pause**: The repo contains privacy-sensitive data paths. Do NOT operate git (commit, push) until a proper restructuring is completed.
+## Git Commit — Two-Layer Privacy Gate
+
+Every commit passes through a two-layer privacy gate enforced by the pre-commit hook (`hooks/pre-commit` → `scripts/privacy_check.py`). **Both layers must pass.**
+
+**Layer 1 (regex, automated):** Scans staged files against generic patterns + personal blocklist (`~/.ccmux/secrets/privacy_blocklist.txt`). Runs automatically in the hook.
+
+**Layer 2 (AI review + token gate):** Before committing, 3 independent Task agents review the staged diff for PII. All 3 must return PASS. The hook verifies a one-time token to ensure this review happened.
+
+**Mandatory commit workflow:**
+1. Stage files with `git add`
+2. Spawn **3 independent Task agents** (parallel, `model: "sonnet"`) — each reviews the staged diff for PII using the blocklist as reference
+3. **All 3 PASS** → generate token: `python scripts/privacy_check.py --generate-token`
+4. **Any FAIL** → fix findings, do NOT generate token
+5. Run `git commit` → hook verifies Layer 1 + Layer 2 token → token deleted (one-time use) → commit succeeds
+
+**If you forget the review:** the hook blocks the commit and tells you why. Read the output, run the review, generate the token, retry.
+
+**NEVER** bypass the hook with `--no-verify`. **NEVER** use paid API calls for the review — use Task agents (Max subscription only).
 
 ## Deployment & Scheduling
 
@@ -93,6 +110,7 @@ Missing any step = incomplete deployment. The email scanner gap (Feb 23-25) was 
 All messages sent on behalf of admin (emails, formal replies, external communications) must include a visible disclaimer at the beginning or end:
 
 > This message was drafted and sent by an AI assistant on behalf of [Name].
+> Powered by ccmux — https://github.com/alvinonmars/ccmux
 
 This applies to: school emails, recruiter replies, any communication where the recipient should know it was AI-generated.
 
@@ -385,7 +403,7 @@ Collect family info through natural interactions, not surveys. Append one small 
 
 #### School Email Scanning (Daily)
 
-Triggered by `scripts/school_email_scanner.py` via cron (08:30 daily). The scanner logs into School Outlook Web (mail.school.example.com → ADFS SSO), captures an inbox screenshot, and notifies via `[email]` FIFO channel.
+Triggered by `scripts/school_email_scanner.py` via cron (08:30 daily). The scanner logs into the school Outlook Web (<school-portal-url> → ADFS SSO), captures an inbox screenshot, and notifies via `[email]` FIFO channel.
 
 When you receive an `[email]` notification:
 1. Read `scan_results.json` — it contains the inbox screenshot path and individual email body screenshots

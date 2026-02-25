@@ -8,7 +8,7 @@ Verifies:
 2. PowerSchool ADFS SSO login succeeds
 3. Screenshots are captured correctly
 4. State persistence works (cookies saved)
-5. Forms page is accessible and contains G1 Field Trip
+5. Forms page is accessible and contains at least one form link
 """
 
 import json
@@ -100,19 +100,18 @@ def main() -> None:
         info = browser.page_info()
         links = browser.get_links()
         forms_found = [l for l in links if "field trip" in l["text"].lower()
-                       or "fieldtrip" in l["text"].lower()
-                       or "G1 Field" in l["text"]]
+                       or "form" in l["text"].lower()]
 
         print(f"  URL: {info['url']}")
         print(f"  Total links: {len(links)}")
-        print(f"  Field trip links: {[l['text'] for l in forms_found]}")
+        print(f"  Form links: {[l['text'] for l in forms_found]}")
 
         results["steps"].append({
             "step": "forms_page",
             "ok": len(forms_found) > 0,
             "url": info["url"],
             "total_links": len(links),
-            "field_trip_links": [l for l in forms_found],
+            "form_links": [l for l in forms_found],
             "screenshot": path,
         })
 

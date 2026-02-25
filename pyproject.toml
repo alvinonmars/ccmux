@@ -24,7 +24,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["ccmux*", "adapters*"]
+include = ["ccmux*", "adapters*", "libs*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

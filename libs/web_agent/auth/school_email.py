@@ -1,12 +1,16 @@
 """School parent email (Outlook Web) login via ADFS SSO.
 
-Entry point: mail.school.example.com → ADFS → Microsoft → Outlook Web
+Entry point: <school-portal-url> → ADFS → Microsoft → Outlook Web
 Uses the same credentials as PowerSchool.
+
+Required environment variable:
+    CCMUX_SCHOOL_EMAIL_URL: School email portal entry URL (e.g. http://prtmail.example.edu)
 """
 
 from __future__ import annotations
 
 import logging
+import os
 
 from libs.web_agent.browser import BrowserSession
 from libs.web_agent.auth.powerschool import load_credentials
@@ -14,7 +18,16 @@ from libs.web_agent.auth.powerschool import load_credentials
 log = logging.getLogger(__name__)
 
 OUTLOOK_URL = "https://outlook.office365.com/mail/"
-ENTRY_URL = "http://mail.school.example.com"
+
+
+def _get_entry_url() -> str:
+    url = os.environ.get("CCMUX_SCHOOL_EMAIL_URL")
+    if not url:
+        raise RuntimeError(
+            "CCMUX_SCHOOL_EMAIL_URL environment variable is not set. "
+            "Set it to the school email portal entry URL."
+        )
+    return url
 
 
 def login(session: BrowserSession, creds: dict[str, str] | None = None) -> bool:
@@ -35,8 +48,9 @@ def login(session: BrowserSession, creds: dict[str, str] | None = None) -> bool:
         return True
 
     # Navigate to email entry point
-    log.info("Navigating to %s", ENTRY_URL)
-    session.goto(ENTRY_URL, timeout=30_000)
+    entry_url = _get_entry_url()
+    log.info("Navigating to %s", entry_url)
+    session.goto(entry_url, timeout=30_000)
     session.wait(3000)
 
     # Check if cookies got us in

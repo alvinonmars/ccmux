@@ -281,9 +281,9 @@ def check_tmux() -> str:
     if rc != 0:
         return f"\u274c Session '{session_name}' not found"
 
-    # Capture pane content
+    # Capture pane content (-S -50 captures last 50 lines)
     rc, pane_content = run_cmd([
-        "tmux", "capture-pane", "-t", session_name, "-p", "-l", "50"
+        "tmux", "capture-pane", "-t", session_name, "-p", "-S", "-50"
     ])
     if rc != 0:
         return f"\u2705 Session exists, but could not capture pane: {pane_content}"

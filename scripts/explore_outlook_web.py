@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Explore School Outlook Web email via ADFS SSO.
+"""Explore school Outlook Web email via ADFS SSO.
 
-Navigates: mail.school.example.com → ADFS login → Outlook Web → inbox
+Navigates: <school-portal-url> → ADFS login → Outlook Web → inbox
 Run with: xvfb-run -a .venv/bin/python scripts/explore_outlook_web.py
+
+Required environment variable:
+    CCMUX_SCHOOL_EMAIL_URL: School email portal entry URL
 """
 
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -27,14 +31,19 @@ def main() -> None:
     username = creds["POWERSCHOOL_USER"]
     password = creds["POWERSCHOOL_PASS"]
 
+    email_url = os.environ.get("CCMUX_SCHOOL_EMAIL_URL")
+    if not email_url:
+        print("ERROR: CCMUX_SCHOOL_EMAIL_URL environment variable is not set.")
+        sys.exit(1)
+
     with BrowserSession(
         state_dir=STATE_DIR,
         screenshot_dir=SCREENSHOT_DIR,
         headless=True,
     ) as browser:
         # Step 1: Navigate to parent email portal
-        print("[1/6] Navigating to mail.school.example.com...")
-        browser.goto("http://mail.school.example.com", timeout=30_000)
+        print(f"[1/6] Navigating to school email portal...")
+        browser.goto(email_url, timeout=30_000)
         browser.wait(3000)
         path = browser.screenshot("01_email_landing")
         info = browser.page_info()

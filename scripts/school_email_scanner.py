@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """School parent email daily scanner.
 
-Screenshot-driven approach: logs into Outlook Web, captures inbox overview
-and individual email body screenshots for NEW emails since the last scan,
-then notifies ccmux so Claude can analyze and forward actionable items.
+Screenshot-driven approach: logs into Outlook Web via <school-portal-url>,
+captures inbox overview and individual email body screenshots for NEW emails
+since the last scan, then notifies ccmux so Claude can analyze and forward
+actionable items.
 
 Scan window: checks emails between the last scan timestamp and now. On first
 run or if the state file is missing, defaults to today's emails only.
@@ -16,6 +17,9 @@ M/D and compare against the last scan date.
 
 State file: ~/.ccmux/data/household/tmp/email_scan/last_scan.json — persists
 the last successful scan timestamp.
+
+Required environment variable:
+    CCMUX_SCHOOL_EMAIL_URL: School email portal entry URL
 
 Run with: xvfb-run -a .venv/bin/python scripts/school_email_scanner.py
 Cron:     30 8 * * * cd <project_root> && xvfb-run -a .venv/bin/python scripts/school_email_scanner.py

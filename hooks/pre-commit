@@ -1,0 +1,15 @@
+#!/bin/bash
+# Pre-commit hook: block commits containing PII patterns.
+# This file is tracked in git. Activate with:
+#   git config core.hooksPath hooks
+
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Use project venv if available, otherwise system python
+if [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+    PYTHON="$SCRIPT_DIR/.venv/bin/python"
+else
+    PYTHON="python3"
+fi
+
+exec "$PYTHON" "$SCRIPT_DIR/scripts/privacy_check.py"

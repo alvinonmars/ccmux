@@ -54,6 +54,7 @@ SECURITY_AUDIT_DIR = DATA_ROOT / "security_audit"
 # --- Secrets sub-paths -------------------------------------------------------
 
 POWERSCHOOL_ENV = SECRETS_ROOT / "powerschool.env"
+GMAIL_ENV = SECRETS_ROOT / "gmail.env"
 
 
 def ensure_dirs() -> None:

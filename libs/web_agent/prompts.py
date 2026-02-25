@@ -5,14 +5,17 @@ Usage from main session:
     from libs.web_agent.prompts import web_task_prompt
 
     prompt = web_task_prompt(
-        task="Sign up for 2025/26 G1 Field Trip on PowerSchool",
+        task="Sign up for an event on PowerSchool",
         auth="powerschool",
-        start_url="https://portal.school.example.com/guardian/forms.html",
+        start_url=os.environ["CCMUX_SCHOOL_PS_URL"] + "/guardian/forms.html",
         requester_jid="<your-jid>@s.whatsapp.net",
     )
 
     # Spawn agent
     Task(subagent_type="general-purpose", model="opus", prompt=prompt)
+
+Required environment variables:
+    CCMUX_SCHOOL_PS_URL: PowerSchool portal base URL
 """
 
 from __future__ import annotations
