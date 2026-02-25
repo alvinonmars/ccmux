@@ -5,7 +5,7 @@ Usage by a Claude Code agent:
     from libs.web_agent import BrowserSession
 
     with BrowserSession(state_dir="/tmp/ps_session",
-                        screenshot_dir="data/household/tmp") as browser:
+                        screenshot_dir="~/.ccmux/data/household/tmp") as browser:
         browser.goto("https://example.com")
         path = browser.screenshot("01_landing")
         info = browser.page_info()

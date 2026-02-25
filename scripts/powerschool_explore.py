@@ -25,8 +25,12 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 # --- Configuration -----------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from ccmux.paths import TMP_DIR
+
 ENV_FILE = Path.home() / ".secrets" / "powerschool.env"
-OUTPUT_DIR = PROJECT_ROOT / "data" / "household" / "tmp"
+OUTPUT_DIR = TMP_DIR
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SCREENSHOT_COUNTER = 0

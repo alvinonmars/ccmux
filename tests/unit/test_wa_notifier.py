@@ -328,7 +328,7 @@ class TestWriteNotification:
         read_fd = os.open(str(fifo_path), os.O_RDONLY | os.O_NONBLOCK)
         try:
             summaries = [
-                {"chat_id": "123@s.whatsapp.net", "sender": "+30000000000",
+                {"chat_id": "123@s.whatsapp.net", "sender": "+10000000000",
                  "count": 2, "preview": "Hey, are you free?"},
             ]
             n._write_notification(summaries)
@@ -336,7 +336,7 @@ class TestWriteNotification:
             data = os.read(read_fd, 4096)
             payload = json.loads(data.decode().strip())
             assert payload["channel"] == "whatsapp"
-            assert "+30000000000" in payload["content"]
+            assert "+10000000000" in payload["content"]
             assert "2 msgs" in payload["content"]
             assert "list_messages" in payload["content"]
             assert isinstance(payload["ts"], int)
@@ -416,7 +416,7 @@ class TestIsGroupJid:
         assert WhatsAppNotifier._is_group_jid("120363123@g.us") is True
 
     def test_personal_jid(self) -> None:
-        assert WhatsAppNotifier._is_group_jid("30000000000@s.whatsapp.net") is False
+        assert WhatsAppNotifier._is_group_jid("10000000000@s.whatsapp.net") is False
 
     def test_empty_string(self) -> None:
         assert WhatsAppNotifier._is_group_jid("") is False
@@ -691,7 +691,7 @@ class TestSingularPluralFormatting:
 # Admin self-chat tests
 # ---------------------------------------------------------------------------
 
-ADMIN_JID = "30000000000@s.whatsapp.net"
+ADMIN_JID = "10000000000@s.whatsapp.net"
 
 
 class TestAdminChat:
@@ -800,7 +800,7 @@ class TestAdminChat:
 # Intent classification: message separation
 # ---------------------------------------------------------------------------
 
-GROUP_JID = "100000000000000001@g.us"
+GROUP_JID = "100000000000000000@g.us"
 
 
 class TestClassifiedMessageSeparation:
@@ -809,7 +809,7 @@ class TestClassifiedMessageSeparation:
         db_path = tmp_path / "messages.db"
         _create_test_db(db_path)
         _insert_messages(db_path, [
-            {"chat_jid": GROUP_JID, "sender": "HelperA",
+            {"chat_jid": GROUP_JID, "sender": "Helper1",
              "content": "S3 hello", "timestamp": _ts(10)},
         ])
         cfg = WANotifierConfig(
@@ -823,7 +823,7 @@ class TestClassifiedMessageSeparation:
         assert regular == []
         assert admin == []
         assert len(classified) == 1
-        assert classified[0]["sender"] == "HelperA"
+        assert classified[0]["sender"] == "Helper1"
         assert classified[0]["content"] == "S3 hello"
         assert classified[0]["chat_jid"] == GROUP_JID
 
@@ -850,7 +850,7 @@ class TestClassifiedMessageSeparation:
         db_path = tmp_path / "messages.db"
         _create_test_db(db_path)
         _insert_messages(db_path, [
-            {"chat_jid": GROUP_JID, "sender": "HelperA",
+            {"chat_jid": GROUP_JID, "sender": "Helper1",
              "content": "group msg", "timestamp": _ts(10)},
             {"chat_jid": "bob@s.whatsapp.net", "sender": "Bob",
              "content": "dm", "timestamp": _ts(11)},
@@ -866,14 +866,14 @@ class TestClassifiedMessageSeparation:
         assert len(regular) == 1
         assert regular[0]["sender"] == "Bob"
         assert len(classified) == 1
-        assert classified[0]["sender"] == "HelperA"
+        assert classified[0]["sender"] == "Helper1"
 
     def test_classify_disabled_no_separation(self, tmp_path: Path) -> None:
         """When classify_enabled=False, no messages go to classified."""
         db_path = tmp_path / "messages.db"
         _create_test_db(db_path)
         _insert_messages(db_path, [
-            {"chat_jid": GROUP_JID, "sender": "HelperA",
+            {"chat_jid": GROUP_JID, "sender": "Helper1",
              "content": "hello", "timestamp": _ts(10)},
         ])
         cfg = WANotifierConfig(
@@ -892,7 +892,7 @@ class TestClassifiedMessageSeparation:
         db_path = tmp_path / "messages.db"
         _create_test_db(db_path)
         _insert_messages(db_path, [
-            {"chat_jid": GROUP_JID, "sender": "HelperA",
+            {"chat_jid": GROUP_JID, "sender": "Helper1",
              "content": "", "timestamp": _ts(10), "media_type": "image"},
         ])
         cfg = WANotifierConfig(

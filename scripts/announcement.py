@@ -5,7 +5,7 @@ One-time announcement sender via ccmux FIFO.
 Usage:
     python3 announcement.py <announcement_id>
 
-Reads announcement content from data/household/butler/announcements/<id>.json
+Reads announcement content from ~/.ccmux/data/household/butler/announcements/<id>.json
 and writes it to the butler FIFO. The JSON file should have:
     {"target": "household_group", "message": "...", "sent": false}
 
@@ -19,7 +19,9 @@ import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-ANNOUNCEMENTS_DIR = PROJECT_ROOT / "data" / "household" / "butler" / "announcements"
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from ccmux.paths import ANNOUNCEMENTS_DIR
 FIFO_PATH = Path("/tmp/ccmux/in.butler")
 
 

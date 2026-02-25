@@ -9,7 +9,7 @@ the portal for event registration, school forms, or announcements related to
 Usage:
     xvfb-run .venv/bin/python3 scripts/powerschool_fieldtrip_explorer.py
 
-Screenshots are saved to data/household/tmp/
+Screenshots are saved to ~/.ccmux/data/household/tmp/
 """
 
 import base64
@@ -28,8 +28,12 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from ccmux.paths import TMP_DIR
+
 ENV_FILE = Path.home() / ".secrets" / "powerschool.env"
-OUT_DIR = PROJECT_ROOT / "data" / "household" / "tmp"
+OUT_DIR = TMP_DIR
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Pages to probe after login (relative to guardian base)

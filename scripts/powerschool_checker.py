@@ -31,11 +31,15 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 # --- Configuration -----------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from ccmux.paths import HOMEWORK_DIR
+
 ENV_FILE = Path.home() / ".secrets" / "powerschool.env"
 CHILD_NAME = os.environ.get("PS_CHILD_NAME", "Child")
 SCHOOL_CODE = os.environ.get("PS_SCHOOL_CODE", "school")
 CHILD_DIR = os.environ.get("PS_CHILD_DIR", "child")
-BASE_OUTPUT_DIR = PROJECT_ROOT / "data" / "household" / "homework" / SCHOOL_CODE / CHILD_DIR
+BASE_OUTPUT_DIR = HOMEWORK_DIR / SCHOOL_CODE / CHILD_DIR
 STATE_FILE = BASE_OUTPUT_DIR / ".seen_assignments.json"
 FIFO_PATH = Path("/tmp/ccmux/in.homework")
 TODAY = date.today()

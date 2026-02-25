@@ -162,7 +162,7 @@ class TestUnknownFallback:
     def test_image_is_unknown(self) -> None:
         """Image messages need Claude to determine intent (receipt? food? school?)."""
         c = IntentClassifier()
-        result = c.classify("", "HelperA", True, "image", "group@g.us")
+        result = c.classify("", "Helper1", True, "image", "group@g.us")
         assert result.intent == Intent.UNKNOWN
         assert result.action == "respond"
 

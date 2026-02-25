@@ -24,8 +24,12 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
+sys.path.insert(0, str(PROJECT_DIR))
+
+from ccmux.paths import SECURITY_AUDIT_DIR
+
 BASH_SCRIPT = SCRIPT_DIR / "security_audit.sh"
-DEFAULT_OUTPUT_DIR = PROJECT_DIR / "data" / "security_audit"
+DEFAULT_OUTPUT_DIR = SECURITY_AUDIT_DIR
 
 # Risk levels (ordered by severity)
 RISK_CRITICAL = "Critical"

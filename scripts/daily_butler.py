@@ -20,7 +20,7 @@ Actions:
     daily_reflection   — 23:00 daily: review day's work, generate reflection log
 
 Environment:
-    BUTLER_STATE_DIR   — directory for state files (default: data/household/butler/)
+    BUTLER_STATE_DIR   — directory for state files (default: ~/.ccmux/data/household/butler/)
 """
 
 import json
@@ -34,10 +34,14 @@ from pathlib import Path
 # --- Configuration -----------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from ccmux.paths import BUTLER_DIR, FAMILY_CONTEXT, DAILY_REFLECTIONS_DIR
+
 STATE_DIR = Path(
     os.environ.get(
         "BUTLER_STATE_DIR",
-        str(PROJECT_ROOT / "data" / "household" / "butler"),
+        str(BUTLER_DIR),
     )
 )
 FIFO_PATH = Path("/tmp/ccmux/in.butler")
@@ -132,7 +136,7 @@ def morning_briefing() -> None:
         f"Morning briefing trigger. Today is {weekday}, {TODAY_ISO}. "
         "Actions: "
         "1) Check weather for Hong Kong and prepare clothing advice. "
-        "2) Read data/household/family_context.jsonl for today's class schedule and activities. "
+        f"2) Read {FAMILY_CONTEXT} for today's class schedule and activities. "
         "3) Check for homework due today or this week. "
         "4) Send a morning briefing message to the household group. "
         "5) Pull recent WhatsApp messages from monitored chats for context."
@@ -145,7 +149,7 @@ def class_reminder() -> None:
     content = (
         f"Class reminder check at {NOW.strftime('%H:%M')}. "
         "Actions: "
-        "1) Read data/household/family_context.jsonl for today's class schedule. "
+        f"1) Read {FAMILY_CONTEXT} for today's class schedule. "
         "2) Check if any class starts within the next 20 minutes. "
         "3) If yes, send a reminder to the household group. "
         "4) If no upcoming class, do nothing."
@@ -178,7 +182,7 @@ def daily_reflection() -> None:
         "4) For each mistake, note a specific improvement (code fix, rule update, behavioral change). "
         "5) List new rules learned from admin corrections today. "
         "6) Preview tomorrow's agenda (pending items, scheduled reminders, follow-ups). "
-        f"7) Write the reflection to data/daily_reflections/{TODAY_ISO}.md."
+        f"7) Write the reflection to {DAILY_REFLECTIONS_DIR}/{TODAY_ISO}.md."
     )
     notify_ccmux(content)
 
@@ -192,7 +196,7 @@ def message_scan() -> None:
         "Actions: "
         "1) Use list_messages with after parameter to efficiently pull only new messages. "
         "2) Scan household group, School community group, activity groups for relevant info. "
-        "3) Update data/household/family_context.jsonl with any new learnings. "
+        f"3) Update {FAMILY_CONTEXT} with any new learnings. "
         "4) If any message requires action (delivery notification, schedule change, etc.), act on it. "
         "5) Do NOT reply to messages unless they start with S3."
     )

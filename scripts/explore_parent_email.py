@@ -13,10 +13,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from ccmux.paths import TMP_DIR
 from libs.web_agent.browser import BrowserSession
 from libs.web_agent.auth.powerschool import load_credentials, login
 
-SCREENSHOT_DIR = PROJECT_ROOT / "data" / "household" / "tmp" / "email_explore"
+SCREENSHOT_DIR = TMP_DIR / "email_explore"
 STATE_DIR = Path("/tmp/web_agent_ps_state")
 
 

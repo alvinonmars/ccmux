@@ -14,11 +14,11 @@ for older ones. We parse aria-label on each email item to distinguish.
 Date extraction: For older emails, "周X M/D" gives relative date; we parse
 M/D and compare against the last scan date.
 
-State file: data/household/tmp/email_scan/last_scan.json — persists
+State file: ~/.ccmux/data/household/tmp/email_scan/last_scan.json — persists
 the last successful scan timestamp.
 
 Run with: xvfb-run -a .venv/bin/python scripts/school_email_scanner.py
-Cron:     30 8 * * * cd /home/user/Desktop/claude-code-hub && xvfb-run -a .venv/bin/python scripts/school_email_scanner.py
+Cron:     30 8 * * * cd <project_root> && xvfb-run -a .venv/bin/python scripts/school_email_scanner.py
 """
 
 from __future__ import annotations
@@ -34,11 +34,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from ccmux.paths import EMAIL_SCAN_DIR
 from libs.web_agent.browser import BrowserSession
 from libs.web_agent.auth.school_email import login
 
 STATE_DIR = Path("/tmp/web_agent_outlook_state")
-SCREENSHOT_DIR = PROJECT_ROOT / "data" / "household" / "tmp" / "email_scan"
+SCREENSHOT_DIR = EMAIL_SCAN_DIR
 SCAN_STATE_PATH = SCREENSHOT_DIR / "last_scan.json"
 FIFO_PATH = Path("/tmp/ccmux/in.email")
 
@@ -78,10 +79,14 @@ def save_scan_state(timestamp: str, email_count: int) -> None:
         json.dump(state, fh, indent=2)
 
 
+_WEEKDAY_MAP = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6}
+
+
 def get_email_date(aria_label: str, today: date) -> date | None:
     """Extract the date of an email from its aria-label.
 
     - Today's emails show HH:MM (no weekday) → return today
+    - Same-week emails show "周X HH:MM" (weekday + time, no M/D) → compute date from weekday
     - Older emails show "周X M/D" → parse M/D and infer year from today
     - Returns None if date cannot be determined
     """
@@ -90,6 +95,19 @@ def get_email_date(aria_label: str, today: date) -> date | None:
 
     if has_time and not has_weekday:
         return today
+
+    # Same-week: "周X HH:MM" with no M/D date
+    if has_weekday and has_time:
+        date_match = _DATE_RE.search(aria_label)
+        if not date_match:
+            # Weekday + time but no M/D → same-week email
+            weekday_char = has_weekday.group(0)[-1]  # 一, 二, 三, ...
+            target_dow = _WEEKDAY_MAP.get(weekday_char)
+            if target_dow is not None:
+                today_dow = today.weekday()  # Monday=0
+                days_back = (today_dow - target_dow) % 7
+                from datetime import timedelta
+                return today - timedelta(days=days_back)
 
     date_match = _DATE_RE.search(aria_label)
     if date_match:

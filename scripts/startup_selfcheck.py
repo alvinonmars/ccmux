@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -31,8 +32,12 @@ from pathlib import Path
 # --- Configuration -----------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from ccmux.paths import BUTLER_DIR
+
 FIFO_PATH = Path("/tmp/ccmux/in.butler")
-STATE_DIR = PROJECT_ROOT / "data" / "household" / "butler"
+STATE_DIR = BUTLER_DIR
 LAST_SCAN_FILE = STATE_DIR / "last_scan.json"
 NOW = datetime.now()
 NOW_ISO = NOW.isoformat()

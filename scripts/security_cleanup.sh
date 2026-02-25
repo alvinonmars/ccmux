@@ -128,10 +128,10 @@ echo ""
 # =========================================
 echo "[6/9] Reviewing user accounts..."
 
-# alvin_sf - set nologin if not needed
+# <unused_account> - set nologin if not needed
 # Uncomment the line below if confirmed not needed:
-# usermod -s /usr/sbin/nologin alvin_sf
-echo "  MANUAL: Review alvin_sf account — uncomment usermod line if not needed"
+# usermod -s /usr/sbin/nologin <unused_account>
+echo "  MANUAL: Review <unused_account> account — uncomment usermod line if not needed"
 
 # nx - NoMachine installed but service not running
 # Uncomment to remove login shell:
@@ -211,11 +211,11 @@ echo "  [8] Forensic scans: $FORENSIC_DIR/"
 echo "  [9] Lynis full scan: $FORENSIC_DIR/lynis_full.log"
 echo ""
 echo "  MANUAL TASKS remaining:"
-echo "  - Review alvin_sf / nx accounts"
+echo "  - Review <unused_account> / nx accounts"
 echo "  - Change privoxy to listen on 127.0.0.1:8118 (edit /etc/privoxy/config)"
 echo "  - Review forensic scan results"
 echo "  - Consider: sudo aideinit (create file integrity baseline)"
 echo "  - Consider: reboot (system up since 2025-12-19)"
 echo ""
 echo "  Copy forensic results for Claude to analyze:"
-echo "  cp -r $FORENSIC_DIR /home/user/Desktop/claude-code-hub/data/security_audit/"
+echo "  cp -r \$FORENSIC_DIR <project_root>/data/security_audit/"

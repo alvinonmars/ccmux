@@ -8,7 +8,7 @@ Usage from main session:
         task="Sign up for 2025/26 G1 Field Trip on PowerSchool",
         auth="powerschool",
         start_url="https://portal.school.example.com/guardian/forms.html",
-        requester_jid="20000000000@s.whatsapp.net",
+        requester_jid="<your-jid>@s.whatsapp.net",
     )
 
     # Spawn agent
@@ -20,6 +20,10 @@ from __future__ import annotations
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+import sys
+sys.path.insert(0, str(PROJECT_ROOT))
+from ccmux.paths import TMP_DIR
 
 
 def web_task_prompt(
@@ -40,10 +44,10 @@ def web_task_prompt(
         requester_jid: WhatsApp JID to send progress screenshots to.
         extra_context: Additional context (form fields, expected content, etc.).
         state_dir: Directory for browser state persistence.
-        screenshot_dir: Directory for screenshots. Defaults to data/household/tmp/.
+        screenshot_dir: Directory for screenshots. Defaults to ~/.ccmux/data/household/tmp/.
     """
     if not screenshot_dir:
-        screenshot_dir = str(PROJECT_ROOT / "data" / "household" / "tmp")
+        screenshot_dir = str(TMP_DIR)
 
     auth_section = ""
     if auth == "powerschool":
