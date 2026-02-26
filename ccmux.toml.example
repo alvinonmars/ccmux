@@ -52,7 +52,7 @@ smart_classify_chats = []
 # Managed services — reconcile verifies these exist and have PartOf
 # ---------------------------------------------------------------------------
 [services]
-managed = ["whatsapp-bridge", "ccmux", "ccmux-wa-notifier"]
+managed = ["whatsapp-bridge", "ccmux", "ccmux-wa-notifier", "ccmux-voice-bridge"]
 
 # ---------------------------------------------------------------------------
 # Timer definitions — ccmux-deploy generates systemd .timer + .service files
