@@ -164,13 +164,8 @@ A good AI assistant reflects on its work daily. Generate a reflection log at end
 
 ## Pending Engineering Tasks
 
-Track admin-requested engineering work. Remind admin periodically (in evening wrap-up or when relevant context arises).
-
-| Task | Priority | Status | Notes |
-|------|----------|--------|-------|
-| Project restructuring | High | Pending | Separate ccmux core from extended capabilities, address privacy data in repo, clean module boundaries. No git until done. |
-| Build `libs/web_agent/` | High | Pending | Screenshot-driven web automation framework. Depends on restructuring decision. |
-| PowerSchool sign-up flow | Medium | Blocked | Event sign-up. Blocked on web_agent framework + admin approval. |
+Development TODO list: **`TODO.md`** (project root, single source of truth).
+Remind admin periodically (in evening wrap-up or when relevant context arises).
 
 ## WhatsApp Integration
 
