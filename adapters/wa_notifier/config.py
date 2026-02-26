@@ -21,6 +21,15 @@ else:
 
 REPLY_PREFIX = "\U0001f916 "  # 🤖 prefix for Claude replies (anti-echo marker)
 
+# Bot message prefixes — used to filter out bot-generated messages and prevent
+# echo loops when forwarding admin's "From: Me" messages from all chats.
+BOT_PREFIXES = (
+    "\U0001f916",   # 🤖 — admin self-chat replies
+    "S3 ",          # S3 — contact replies
+    "S3\n",         # S3 — contact replies (multiline)
+    "\U0001f3e1",   # 🏡 — household group replies
+)
+
 
 @dataclass
 class WANotifierConfig:

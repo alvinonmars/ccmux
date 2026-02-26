@@ -15,7 +15,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from adapters.wa_notifier.config import REPLY_PREFIX, WANotifierConfig
+from adapters.wa_notifier.config import BOT_PREFIXES, REPLY_PREFIX, WANotifierConfig
 
 log = logging.getLogger(__name__)
 
@@ -158,33 +158,20 @@ class WhatsAppNotifier:
             # are picked up (for echo filtering in Claude)
             include_from_me |= self._smart_classify_chats
 
-            if include_from_me:
-                placeholders = ",".join("?" for _ in include_from_me)
-                cur.execute(
-                    f"""
-                    SELECT chat_jid, sender, content, timestamp, is_from_me,
-                           media_type
-                    FROM messages
-                    WHERE timestamp > ?
-                      AND (content != '' OR media_type IS NOT NULL)
-                      AND (is_from_me = 0 OR chat_jid IN ({placeholders}))
-                    ORDER BY timestamp ASC
-                    """,
-                    (self.last_seen_ts, *include_from_me),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT chat_jid, sender, content, timestamp, is_from_me,
-                           media_type
-                    FROM messages
-                    WHERE timestamp > ?
-                      AND is_from_me = 0
-                      AND (content != '' OR media_type IS NOT NULL)
-                    ORDER BY timestamp ASC
-                    """,
-                    (self.last_seen_ts,),
-                )
+            # Fetch ALL messages (including is_from_me) so admin's messages
+            # from any chat can be forwarded.  Bot echo filtering is done in
+            # Python below using BOT_PREFIXES.
+            cur.execute(
+                """
+                SELECT chat_jid, sender, content, timestamp, is_from_me,
+                       media_type
+                FROM messages
+                WHERE timestamp > ?
+                  AND (content != '' OR media_type IS NOT NULL)
+                ORDER BY timestamp ASC
+                """,
+                (self.last_seen_ts,),
+            )
             rows = cur.fetchall()
         finally:
             conn.close()
@@ -207,27 +194,44 @@ class WhatsAppNotifier:
             is_from_me = row["is_from_me"] == 1
             content = row["content"] or ""
 
-            if admin_jid and chat_jid == admin_jid and is_from_me:
-                # Admin self-chat: forward full content (skip bot's own replies)
-                if content.startswith(REPLY_PREFIX):
-                    continue
-                media_type = (
-                    row["media_type"] if "media_type" in row.keys() else None
-                )
-                # For media-only messages, describe the media type
-                fwd_content = content
-                if not fwd_content and media_type:
-                    fwd_content = f"[{media_type}]"
-                admin_msgs.append({
-                    "content": fwd_content,
-                    "timestamp": row["timestamp"],
-                    "media_type": media_type,
-                })
+            if is_from_me:
+                if admin_jid and chat_jid == admin_jid:
+                    # Admin self-chat: skip bot echoes, forward human messages
+                    if any(content.startswith(p) for p in BOT_PREFIXES):
+                        continue
+                    media_type = (
+                        row["media_type"] if "media_type" in row.keys() else None
+                    )
+                    fwd_content = content
+                    if not fwd_content and media_type:
+                        fwd_content = f"[{media_type}]"
+                    admin_msgs.append({
+                        "content": fwd_content,
+                        "timestamp": row["timestamp"],
+                        "media_type": media_type,
+                    })
+                elif chat_jid in allowed_group_set or chat_jid in self._smart_classify_chats:
+                    # Admin typing in monitored groups: include as regular
+                    regular_rows.append(row)
+                else:
+                    # Admin typing in other chats (e.g. Joy's chat):
+                    # forward as admin message so instructions reach the bot
+                    media_type = (
+                        row["media_type"] if "media_type" in row.keys() else None
+                    )
+                    fwd_content = content
+                    if not fwd_content and media_type:
+                        fwd_content = f"[{media_type}]"
+                    admin_msgs.append({
+                        "content": fwd_content,
+                        "timestamp": row["timestamp"],
+                        "media_type": media_type,
+                    })
             elif chat_jid in allowed_group_set or chat_jid in self._smart_classify_chats:
                 # Monitored groups: include ALL messages without filtering.
                 # Echo handling is done by Claude (it knows what it sent).
                 regular_rows.append(row)
-            elif not is_from_me:
+            else:
                 regular_rows.append(row)
 
         # Filter regular messages by allowed_chats

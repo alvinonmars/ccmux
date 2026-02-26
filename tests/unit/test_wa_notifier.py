@@ -212,18 +212,62 @@ class TestQueryNewMessages:
         assert alice["count"] == 2
         assert alice["preview"] == "Second"  # last message
 
-    def test_ignores_own_messages(self, tmp_path: Path) -> None:
+    def test_forwards_own_messages_as_admin(self, tmp_path: Path) -> None:
+        """Admin's from_me messages in any chat are forwarded as admin msgs."""
         db_path = tmp_path / "messages.db"
         _create_test_db(db_path)
         _insert_messages(db_path, [
             {"chat_jid": "123@s.whatsapp.net", "sender": "Me",
-             "content": "My reply", "timestamp": _ts(10), "is_from_me": 1},
+             "content": "My instruction", "timestamp": _ts(10), "is_from_me": 1},
         ])
         cfg = WANotifierConfig(db_path=db_path, runtime_dir=tmp_path)
         n = WhatsAppNotifier(cfg)
         n.last_seen_ts = _BEFORE_BASE
         regular, admin, _, _ = n._query_new_messages()
         assert regular == []
+        assert len(admin) == 1
+        assert admin[0]["content"] == "My instruction"
+
+    def test_filters_bot_prefix_in_admin_self_chat(self, tmp_path: Path) -> None:
+        """Bot-generated from_me messages in admin self-chat are filtered out."""
+        db_path = tmp_path / "messages.db"
+        _create_test_db(db_path)
+        _insert_messages(db_path, [
+            {"chat_jid": ADMIN_JID, "sender": ADMIN_JID,
+             "content": "\U0001f916 Bot reply", "timestamp": _ts(10), "is_from_me": 1},
+            {"chat_jid": ADMIN_JID, "sender": ADMIN_JID,
+             "content": "S3 Contact reply echo", "timestamp": _ts(11), "is_from_me": 1},
+            {"chat_jid": ADMIN_JID, "sender": ADMIN_JID,
+             "content": "\U0001f3e1 S3 Group reply echo", "timestamp": _ts(12), "is_from_me": 1},
+        ])
+        cfg = WANotifierConfig(
+            db_path=db_path, runtime_dir=tmp_path, admin_jid=ADMIN_JID,
+        )
+        n = WhatsAppNotifier(cfg)
+        n.last_seen_ts = _BEFORE_BASE
+        regular, admin, _, _ = n._query_new_messages()
+        assert regular == []
+        assert admin == []
+
+    def test_admin_s3_in_group_not_filtered(self, tmp_path: Path) -> None:
+        """Admin typing 'S3 ...' in a monitored group must NOT be filtered by BOT_PREFIXES."""
+        db_path = tmp_path / "messages.db"
+        _create_test_db(db_path)
+        _insert_messages(db_path, [
+            {"chat_jid": GROUP_JID, "sender": ADMIN_JID,
+             "content": "S3 hailey是不是12号？", "timestamp": _ts(10), "is_from_me": 1},
+        ])
+        cfg = WANotifierConfig(
+            db_path=db_path, runtime_dir=tmp_path, admin_jid=ADMIN_JID,
+            classify_enabled=True, smart_classify_chats=[GROUP_JID],
+            ignore_groups=False,
+        )
+        n = WhatsAppNotifier(cfg)
+        n.last_seen_ts = _BEFORE_BASE
+        regular, admin, classified, _ = n._query_new_messages()
+        # Admin S3 message in group should reach classified (not dropped)
+        assert len(classified) == 1
+        assert classified[0]["content"] == "S3 hailey是不是12号？"
         assert admin == []
 
     def test_filters_by_allowed_chats(self, tmp_path: Path) -> None:
@@ -752,8 +796,8 @@ class TestAdminChat:
         assert len(admin) == 1
         assert admin[0]["content"] == "admin msg"
 
-    def test_no_admin_jid_ignores_own_messages(self, tmp_path: Path) -> None:
-        """Without admin_jid, is_from_me=1 messages are still filtered out."""
+    def test_no_admin_jid_still_forwards_own_messages(self, tmp_path: Path) -> None:
+        """Without admin_jid, is_from_me=1 messages are still forwarded as admin."""
         db_path = tmp_path / "messages.db"
         _create_test_db(db_path)
         _insert_messages(db_path, [
@@ -765,7 +809,8 @@ class TestAdminChat:
         n.last_seen_ts = _BEFORE_BASE
         regular, admin, _, _ = n._query_new_messages()
         assert regular == []
-        assert admin == []
+        assert len(admin) == 1
+        assert admin[0]["content"] == "hello"
 
     def test_admin_notification_full_content(self, tmp_path: Path) -> None:
         """Admin notifications should include full message content, not summary."""
