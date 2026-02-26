@@ -1,5 +1,5 @@
 # ccmux configuration
-# All values shown are defaults. Override as needed for your deployment.
+# Commented-out values show the code defaults. Override as needed.
 # Copy this file to ccmux.toml and customize for your deployment.
 # ccmux.toml is gitignored (contains machine-specific paths).
 
@@ -14,7 +14,7 @@ dir           = "/tmp/ccmux"
 
 [timing]
 # Seconds of terminal inactivity required before auto-injection is allowed.
-idle_threshold   = 5
+idle_threshold   = 30
 # Seconds of stdout silence that signal Claude is ready for input.
 silence_timeout  = 3
 
@@ -38,9 +38,35 @@ backoff_cap     = 60   # maximum seconds between restart attempts
 # Polling interval in seconds (lower = faster chat response, higher = less I/O)
 poll_interval = 5
 # Only notify for messages from these chat IDs (empty = all chats)
-allowed_chats = []
+# allowed_chats = ["120363...@g.us", "8526...@s.whatsapp.net"]
 # Ignore group messages (only notify for 1:1 chats)
 ignore_groups = true
 # Admin JID for self-chat channel. Auto-detected from bridge device DB.
 # Override via CCMUX_WA_ADMIN_JID env var (phone number or full JID).
 # admin_jid = ""
+# Enable AI classifier for noise filtering in specified chats
+classify_enabled = false
+smart_classify_chats = []
+
+# ---------------------------------------------------------------------------
+# Managed services — reconcile verifies these exist and have PartOf
+# ---------------------------------------------------------------------------
+[services]
+managed = ["whatsapp-bridge", "ccmux", "ccmux-wa-notifier"]
+
+# ---------------------------------------------------------------------------
+# Timer definitions — ccmux-deploy generates systemd .timer + .service files
+# Uses systemd OnCalendar syntax (not cron). Use a list for multiple triggers.
+# ---------------------------------------------------------------------------
+# [timers.my-task]
+# description = "What this does"
+# schedule = "*-*-* 08:00:00"
+# exec = ".venv/bin/python3 scripts/my_script.py"
+# syslog = "ccmux-my-task"
+# env = { MY_VAR = "value" }
+#
+# [timers.startup-check]
+# description = "One-shot after boot"
+# startup_delay = "30s"
+# exec = ".venv/bin/python3 scripts/startup_selfcheck.py"
+# syslog = "ccmux-selfcheck"

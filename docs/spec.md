@@ -165,7 +165,7 @@ Adapters create their own FIFOs on startup; the daemon auto-discovers them via i
 | Component | Responsibility |
 |-----------|---------------|
 | Directory watcher (inotify) | Watches `/tmp/ccmux/`, detects FIFO additions/removals |
-| Input FIFO reader | `O_NONBLOCK` + `select` + `os.read()` on all `in.*` FIFOs (SP-03: avoids readline deadlock) |
+| Input FIFO reader | `O_RDWR` + `O_NONBLOCK` + `asyncio.add_reader()` on all `in.*` FIFOs (SP-03: avoids readline deadlock) |
 | Message collector | Gathers queued messages on stop hook signal + terminal idle check, injects all at once |
 | tmux injector | `tmux send-keys -l 'content'` + `tmux send-keys Enter` to inject text into the Claude pane (two steps, SP-04 verified) |
 | Ready detector | Determines whether Claude Code is waiting for input |
@@ -174,6 +174,8 @@ Adapters create their own FIFOs on startup; the daemon auto-discovers them via i
 | Output pub/sub | Maintains subscriber list, broadcasts complete turns |
 | Lifecycle manager | Monitors Claude Code process, restarts with exponential backoff on crash |
 | Terminal activity detector | Reads `#{client_activity}` via `tmux display-message`; returns last interactive client keyboard timestamp; server-wide scope |
+| Reconciler (`ccmux-deploy`) | Syncs `ccmux.toml` `[timers]` → systemd `.timer`/`.service` files; verifies managed services |
+| Path config (`paths.py`) | Central data path resolution; overridable via `CCMUX_DATA_DIR` / `CCMUX_SECRETS_DIR` env vars |
 | Logger | Structured JSON logs |
 
 ### Message Collection and Injection Flow
@@ -200,7 +202,7 @@ Full flow when ccmux starts (or restarts):
 ```
 1. Environment check: verify HTTP_PROXY/HTTPS_PROXY point to local proxy (default http://127.0.0.1:8118)
 2. Hook installation: write/update the hooks field in project-level .claude/settings.json (idempotent, preserves other fields)
-3. MCP server start: start on a fixed socket path (no PID or random suffix)
+3. MCP server start: start SSE server on `127.0.0.1:{mcp.port}` (loopback only)
 4. MCP config write: write MCP server address into Claude Code config
 5. tmux session handling:
    a. Session does not exist → create new, run `claude --dangerously-skip-permissions` in pane
@@ -300,8 +302,9 @@ The ccmux daemon runs as an MCP server, ready before Claude Code starts. See the
 Provided tool:
 
 ```
-send_to_channel(channel: str, message: str) -> void
+send_to_channel(channel: str, message: str) -> str
   → writes to /tmp/ccmux/out.<channel>
+  → returns "ok" on success, or an error description
   → if that FIFO does not exist, returns an error to Claude (Claude decides how to handle it)
 ```
 
@@ -382,7 +385,7 @@ For use by the stop hook script only. Format:
 
 ## Configuration
 
-Configuration is read from `ccmux.toml` in the working directory (the project root). All values have defaults; the file is safe to commit — it contains no secrets or machine-specific paths.
+Configuration is read from `ccmux.toml` in the working directory (the project root). All values have defaults. The file is **gitignored** because it contains machine-specific paths (DB paths, proxy URLs). A `ccmux.toml.example` is committed as a template.
 
 ```toml
 [project]
@@ -407,7 +410,21 @@ backoff_cap     = 60     # maximum seconds between restart attempts
 proxy = ""               # HTTP proxy URL passed only to the claude invocation.
                          # ccmux itself never uses this proxy.
                          # Falls back to HTTP_PROXY env var if not set here.
-                         # Example: "http://127.0.0.1:8118"
+
+[whatsapp]               # only needed if using wa-notifier adapter
+db_path = ""             # path to whatsapp-bridge SQLite database (required)
+poll_interval = 5        # seconds between database polls
+ignore_groups = true     # ignore group messages (only notify 1:1 chats)
+classify_enabled = false # enable AI classifier for household group messages
+smart_classify_chats = [] # chat JIDs that use AI classification
+
+[services]               # managed services verified by ccmux-deploy
+managed = []             # list of systemd user service names
+
+# [timers.<name>]        # scheduled tasks — see Timer Management in README
+# schedule = "..."       # systemd OnCalendar syntax
+# exec = "..."           # command to run
+# syslog = "..."         # journal identifier
 ```
 
 **tmux session name**: `ccmux-{project.name}`. Multiple ccmux instances for different projects co-exist without collision.
@@ -479,8 +496,8 @@ proxy = ""               # HTTP proxy URL passed only to the claude invocation.
 - **O_NONBLOCK open (no writer)**: `open()` returns immediately (no ENXIO), `read()` returns `b''` (no data), no blocking
 - **EOF detection**: when all writers close, `read()` returns `b''`; reader correctly detects EOF
 - **Short messages (< PIPE_BUF = 4096B)**: concurrent writes are **atomic**, zero data interleaving
-- **Long messages (> PIPE_BUF)**: writes are not atomic; `readline()` can mutually block with writers causing deadlock. Must use `select` + `os.read()` non-blocking reads
-- **Conclusion**: daemon must read FIFOs with `O_NONBLOCK` + `select` + `os.read()`; `readline()` is forbidden. Message length should be kept < 4096B (naturally satisfied for single messages)
+- **Long messages (> PIPE_BUF)**: writes are not atomic; `readline()` can mutually block with writers causing deadlock. Must use non-blocking reads
+- **Conclusion**: daemon must read FIFOs with `O_RDWR` + `O_NONBLOCK` + `asyncio.add_reader()`; `readline()` is forbidden. Message length should be kept < 4096B (naturally satisfied for single messages)
 
 ### SP-04 Findings (tmux send-keys injection)
 
