@@ -34,10 +34,17 @@ class WhatsAppNotifier:
         # Intent classification (local heuristics only, no API calls)
         self._classifier = None
         self._smart_classify_chats: set[str] = set()
+
+        # Load S3 whitelist from contacts.json for permission gating
+        from ccmux.paths import load_s3_whitelist
+        self._s3_whitelist: frozenset[str] = load_s3_whitelist()
+        if self._s3_whitelist:
+            log.info("S3 whitelist loaded: %d JID(s)", len(self._s3_whitelist))
+
         if cfg.classify_enabled and cfg.smart_classify_chats:
             self._smart_classify_chats = set(cfg.smart_classify_chats)
             from adapters.wa_notifier.classifier import IntentClassifier
-            self._classifier = IntentClassifier()
+            self._classifier = IntentClassifier(s3_whitelist=self._s3_whitelist)
             log.info(
                 "Intent classifier enabled for %d chat(s)",
                 len(self._smart_classify_chats),

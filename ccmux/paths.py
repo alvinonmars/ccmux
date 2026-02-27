@@ -58,6 +58,21 @@ POWERSCHOOL_ENV = SECRETS_ROOT / "powerschool.env"
 GMAIL_ENV = SECRETS_ROOT / "gmail.env"
 
 
+def load_s3_whitelist() -> frozenset[str]:
+    """Load S3-permitted JIDs from contacts.json permissions section.
+
+    Returns an empty frozenset if the file or section is missing,
+    which the classifier interprets as "allow all" (backward compatible).
+    """
+    if not CONTACTS_FILE.exists():
+        return frozenset()
+    import json
+
+    data = json.loads(CONTACTS_FILE.read_text())
+    jids = data.get("permissions", {}).get("s3_whitelist", [])
+    return frozenset(jids)
+
+
 def ensure_dirs() -> None:
     """Create all standard data directories if they don't exist."""
     for d in (

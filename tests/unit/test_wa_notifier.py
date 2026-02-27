@@ -957,6 +957,66 @@ class TestClassifiedMessageSeparation:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# S3 whitelist loading
+# ---------------------------------------------------------------------------
+
+
+class TestS3WhitelistLoading:
+    def test_load_whitelist_from_contacts_json(self, tmp_path: Path, monkeypatch) -> None:
+        """load_s3_whitelist reads permissions.s3_whitelist from contacts.json."""
+        contacts = tmp_path / "contacts.json"
+        contacts.write_text(json.dumps({
+            "contacts": [],
+            "permissions": {
+                "s3_whitelist": ["a@s.whatsapp.net", "b@g.us"],
+            },
+        }))
+        import ccmux.paths as paths_mod
+        monkeypatch.setattr(paths_mod, "CONTACTS_FILE", contacts)
+        from ccmux.paths import load_s3_whitelist
+        result = load_s3_whitelist()
+        assert result == frozenset({"a@s.whatsapp.net", "b@g.us"})
+
+    def test_load_whitelist_missing_file(self, tmp_path: Path, monkeypatch) -> None:
+        """Missing contacts.json returns empty frozenset."""
+        import ccmux.paths as paths_mod
+        monkeypatch.setattr(paths_mod, "CONTACTS_FILE", tmp_path / "missing.json")
+        from ccmux.paths import load_s3_whitelist
+        result = load_s3_whitelist()
+        assert result == frozenset()
+
+    def test_load_whitelist_no_permissions_section(self, tmp_path: Path, monkeypatch) -> None:
+        """contacts.json without permissions section returns empty frozenset."""
+        contacts = tmp_path / "contacts.json"
+        contacts.write_text(json.dumps({"contacts": []}))
+        import ccmux.paths as paths_mod
+        monkeypatch.setattr(paths_mod, "CONTACTS_FILE", contacts)
+        from ccmux.paths import load_s3_whitelist
+        result = load_s3_whitelist()
+        assert result == frozenset()
+
+    def test_notifier_passes_whitelist_to_classifier(self, tmp_path: Path, monkeypatch) -> None:
+        """WhatsAppNotifier should pass whitelist to IntentClassifier on init."""
+        db_path = tmp_path / "messages.db"
+        _create_test_db(db_path)
+        contacts = tmp_path / "contacts.json"
+        contacts.write_text(json.dumps({
+            "contacts": [],
+            "permissions": {"s3_whitelist": ["x@g.us"]},
+        }))
+        import ccmux.paths as paths_mod
+        monkeypatch.setattr(paths_mod, "CONTACTS_FILE", contacts)
+
+        cfg = WANotifierConfig(
+            db_path=db_path, runtime_dir=tmp_path,
+            classify_enabled=True, smart_classify_chats=["x@g.us"],
+        )
+        n = WhatsAppNotifier(cfg)
+        assert n._classifier is not None
+        assert n._classifier._s3_whitelist == frozenset({"x@g.us"})
+
+
 class TestConfigClassifyFields:
     def test_classify_disabled_by_default(self, tmp_path: Path) -> None:
         db_path = tmp_path / "messages.db"

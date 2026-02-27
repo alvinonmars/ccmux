@@ -222,3 +222,54 @@ class TestContextBuffer:
         chat = "group@g.us"
         c.classify("\U0001f44d", "Alice", False, None, chat)
         assert chat not in c._context_buffer or len(c._context_buffer[chat]) == 0
+
+
+# ---------------------------------------------------------------------------
+# S3 whitelist gate
+# ---------------------------------------------------------------------------
+
+
+class TestS3Whitelist:
+    WHITELISTED = "allowed@g.us"
+    NOT_WHITELISTED = "stranger@s.whatsapp.net"
+    WHITELIST = frozenset({WHITELISTED, "admin@s.whatsapp.net"})
+
+    def test_s3_from_whitelisted_chat(self) -> None:
+        """S3 message from a whitelisted chat should be S3_COMMAND."""
+        c = IntentClassifier(s3_whitelist=self.WHITELIST)
+        result = c.classify("S3 hello", "Alice", False, None, self.WHITELISTED)
+        assert result.intent == Intent.S3_COMMAND
+        assert result.confidence == 1.0
+
+    def test_s3_from_non_whitelisted_chat(self) -> None:
+        """S3 message from a non-whitelisted chat should be downgraded to UNKNOWN."""
+        c = IntentClassifier(s3_whitelist=self.WHITELIST)
+        result = c.classify("S3 hello", "Stranger", False, None, self.NOT_WHITELISTED)
+        assert result.intent == Intent.UNKNOWN
+        assert result.confidence == 0.0
+        assert "not whitelisted" in result.reasoning
+
+    def test_empty_whitelist_allows_all(self) -> None:
+        """Empty whitelist (not configured) should allow all S3 commands — backward compat."""
+        c = IntentClassifier(s3_whitelist=frozenset())
+        result = c.classify("S3 hello", "Anyone", False, None, "random@s.whatsapp.net")
+        assert result.intent == Intent.S3_COMMAND
+
+    def test_none_whitelist_allows_all(self) -> None:
+        """None whitelist (default) should allow all S3 commands."""
+        c = IntentClassifier(s3_whitelist=None)
+        result = c.classify("S3 hello", "Anyone", False, None, "random@s.whatsapp.net")
+        assert result.intent == Intent.S3_COMMAND
+
+    def test_non_s3_unaffected_by_whitelist(self) -> None:
+        """Non-S3 messages should not be affected by the whitelist."""
+        c = IntentClassifier(s3_whitelist=self.WHITELIST)
+        result = c.classify("hello", "Alice", False, None, self.NOT_WHITELISTED)
+        assert result.intent == Intent.UNKNOWN
+        assert "not whitelisted" not in result.reasoning
+
+    def test_non_whitelisted_s3_updates_context(self) -> None:
+        """Non-whitelisted S3 messages should still update context buffer."""
+        c = IntentClassifier(s3_whitelist=self.WHITELIST)
+        c.classify("S3 hello", "Stranger", False, None, self.NOT_WHITELISTED)
+        assert len(c._context_buffer[self.NOT_WHITELISTED]) == 1

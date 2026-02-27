@@ -341,6 +341,7 @@ On system boot (or `systemctl --user start ccmux.target`), services start in thi
    │
    ├── 5. ccmux-wa-notifier.service (After=ccmux, Requires=ccmux)
    │       → Polls whatsapp-bridge SQLite DB for new messages
+   │       → Loads S3 whitelist from contacts.json (permission gate)
    │       → Classifies messages (admin self-chat, monitored groups, contacts)
    │       → Filters bot echo loops via BOT_PREFIXES (admin self-chat only)
    │       → Writes JSON to /tmp/ccmux/in.whatsapp FIFO
@@ -470,13 +471,35 @@ All privacy-sensitive data lives outside the repo under `~/.ccmux/`:
 │   ├── contacts/                   # per-contact chat history + diet logs
 │   ├── daily_reflections/          # end-of-day AI reflection logs
 │   ├── security_audit/
-│   └── contacts.json               # contact registry
+│   └── contacts.json               # contact registry + S3 whitelist permissions
 │
 └── secrets/                        # CCMUX_SECRETS_DIR (overridable via env)
     └── powerschool.env             # PowerSchool credentials
 ```
 
 All scripts import paths from `ccmux/paths.py` — the single source of truth for data locations. Override via environment variables: `CCMUX_DATA_DIR`, `CCMUX_SECRETS_DIR`.
+
+### S3 Whitelist (Permission Gate)
+
+The wa-notifier enforces a whitelist on S3 command handling. Only messages from explicitly approved chat JIDs are classified as `S3_COMMAND`; messages from non-whitelisted chats with an S3 prefix are downgraded to `UNKNOWN` (Claude sees the raw text but does not treat it as an S3 command).
+
+The whitelist is stored in `~/.ccmux/data/contacts.json` under `permissions.s3_whitelist`:
+
+```json
+{
+  "contacts": [ ... ],
+  "permissions": {
+    "s3_whitelist": [
+      "<phone>@s.whatsapp.net",
+      "<group-id>@g.us"
+    ]
+  }
+}
+```
+
+- JIDs are chat-level: `@s.whatsapp.net` for 1:1 chats, `@g.us` for groups
+- Empty or missing whitelist = all S3 commands pass through (backward compatible)
+- Changes take effect on wa-notifier restart
 
 ### Troubleshooting
 

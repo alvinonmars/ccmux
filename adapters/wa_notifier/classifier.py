@@ -90,8 +90,9 @@ class IntentClassifier:
     everything else to Claude Code as ``unknown``.  Zero external API calls.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, s3_whitelist: frozenset[str] | None = None) -> None:
         self._context_buffer: dict[str, list[str]] = {}
+        self._s3_whitelist: frozenset[str] = s3_whitelist or frozenset()
 
     def classify(
         self,
@@ -104,8 +105,14 @@ class IntentClassifier:
         """Classify a single message using local heuristics."""
         stripped = text.strip() if text else ""
 
-        # 1. S3 prefix — actionable command
+        # 1. S3 prefix — check whitelist before treating as command
         if len(stripped) >= 2 and stripped[:2].upper() == "S3":
+            if self._s3_whitelist and chat_jid not in self._s3_whitelist:
+                log.info("S3 from non-whitelisted chat %s, treating as unknown", chat_jid)
+                self._update_context(chat_jid, text, sender)
+                return ClassificationResult(
+                    Intent.UNKNOWN, 0.0, "S3 prefix but chat not whitelisted", "respond",
+                )
             self._update_context(chat_jid, text, sender)
             return ClassificationResult(
                 Intent.S3_COMMAND, 1.0, "S3 prefix detected", "respond",
