@@ -61,6 +61,72 @@ READING_PANE_SELECTORS = [
     '.customScrollBar',
 ]
 
+# JavaScript to expand a scrollable element so its full content is visible.
+# Returns a JSON object with original styles for restoration and height metrics.
+_JS_EXPAND_ELEMENT = """
+(el) => {
+    const originals = [];
+    const before_height = el.scrollHeight;
+    const before_client = el.clientHeight;
+
+    // Walk up from the element to the body, removing overflow/height constraints
+    let node = el;
+    while (node && node !== document.documentElement) {
+        const cs = getComputedStyle(node);
+        const entry = {
+            overflow: node.style.overflow,
+            overflowY: node.style.overflowY,
+            maxHeight: node.style.maxHeight,
+            height: node.style.height,
+        };
+        originals.push(entry);
+
+        if (cs.overflow !== 'visible' || cs.overflowY !== 'visible') {
+            node.style.overflow = 'visible';
+            node.style.overflowY = 'visible';
+        }
+        if (cs.maxHeight !== 'none') {
+            node.style.maxHeight = 'none';
+        }
+        // Only force height:auto on the target element and its immediate
+        // scrollable ancestors; leave outer layout containers alone
+        if (node === el || cs.overflowY === 'auto' || cs.overflowY === 'scroll') {
+            node.style.height = 'auto';
+        }
+        node = node.parentElement;
+    }
+
+    const after_height = el.scrollHeight;
+    const after_client = el.clientHeight;
+    return {
+        originals: originals,
+        before_scroll_height: before_height,
+        before_client_height: before_client,
+        after_scroll_height: after_height,
+        after_client_height: after_client,
+    };
+}
+"""
+
+# JavaScript to restore original styles after expansion.
+# Takes the element and the originals array returned by _JS_EXPAND_ELEMENT.
+_JS_RESTORE_ELEMENT = """
+(args) => {
+    const [el, originals] = args;
+    let node = el;
+    let i = 0;
+    while (node && node !== document.documentElement && i < originals.length) {
+        const entry = originals[i];
+        node.style.overflow = entry.overflow;
+        node.style.overflowY = entry.overflowY;
+        node.style.maxHeight = entry.maxHeight;
+        node.style.height = entry.height;
+        node = node.parentElement;
+        i++;
+    }
+}
+"""
+
 
 def load_last_scan() -> dict | None:
     """Load the last scan state from disk."""
@@ -213,7 +279,7 @@ def capture_new_emails(
             item.click()
             browser.wait(2000)
 
-            # Screenshot just the reading pane
+            # Screenshot the full reading pane (expand to capture all content)
             reading_pane = None
             for selector in READING_PANE_SELECTORS:
                 el = page.query_selector(selector)
@@ -225,8 +291,34 @@ def capture_new_emails(
             out_path = SCREENSHOT_DIR / f"email_body_{date_str}_{idx}.png"
 
             if reading_pane:
+                # Expand the reading pane to reveal full scrollable content
+                expand_info = None
+                try:
+                    expand_info = page.evaluate(_JS_EXPAND_ELEMENT, reading_pane)
+                    print(
+                        f"    Reading pane height: "
+                        f"before={expand_info['before_client_height']}px "
+                        f"(scroll={expand_info['before_scroll_height']}px), "
+                        f"after={expand_info['after_client_height']}px "
+                        f"(scroll={expand_info['after_scroll_height']}px)"
+                    )
+                except Exception as exp_err:
+                    print(f"    Warning: could not expand reading pane: {exp_err}")
+
+                # Wait briefly for layout reflow after expansion
+                browser.wait(300)
                 reading_pane.screenshot(path=str(out_path))
                 print(f"    Saved reading pane: {out_path}")
+
+                # Restore original styles so the next email click works normally
+                if expand_info and expand_info.get("originals"):
+                    try:
+                        page.evaluate(
+                            _JS_RESTORE_ELEMENT,
+                            [reading_pane, expand_info["originals"]],
+                        )
+                    except Exception as rest_err:
+                        print(f"    Warning: could not restore reading pane: {rest_err}")
             else:
                 page.screenshot(path=str(out_path))
                 print(f"    Reading pane not found, saved full page: {out_path}")
