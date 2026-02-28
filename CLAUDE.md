@@ -106,6 +106,38 @@ A script/feature is NOT "done" until all steps are verified:
 
 Missing any step = incomplete deployment. The email scanner gap (Feb 23-25) was caused by skipping steps 2-5.
 
+## Boot & Context Recovery
+
+The assistant must function reliably across restarts, context compressions, and session resets. All critical operational state is persisted externally — never rely solely on conversation memory.
+
+**Boot recovery chain:**
+```
+loginctl linger → ccmux.target → Docker VPN → whatsapp-bridge → ccmux daemon → wa_notifier → startup_selfcheck
+```
+
+**Persistent state files** (survive reboot):
+
+| File | Purpose |
+|------|---------|
+| `~/.ccmux/data/wa_notifier_state.json` | Message delivery high-water mark |
+| `~/.ccmux/data/pending_tasks.jsonl` | Task lifecycle tracker (pending → closed) |
+| `~/.ccmux/data/household/family_context.jsonl` | Accumulated family knowledge |
+| `~/.ccmux/data/household/butler/selfcheck_report.txt` | Last selfcheck report |
+| `~/.ccmux/data/daily_reflections/YYYY-MM-DD.md` | Daily reflection logs |
+| `~/.ccmux/data/household/health/*/poo_log.jsonl` | Health tracking per child |
+
+**Startup selfcheck** (`scripts/startup_selfcheck.py`, triggered by timer):
+1. Checks all services, timers, tmux, proxy, Docker, disk
+2. Loads pending tasks, family context, health data, last reflection
+3. Writes full report to `selfcheck_report.txt`
+4. Sends short FIFO message telling Claude to read the report and execute recovery actions
+
+**After any context loss** (reboot, compaction, /clear):
+1. Read the selfcheck report (if recent) or read persistent state files directly
+2. Review open pending tasks — follow up on any overdue
+3. Scan for missed messages using `list_messages` with `after` parameter
+4. Resume all active routines (butler, health tracking, expense tracking)
+
 **AI disclaimer — MUST include on all external communications:**
 
 All messages sent on behalf of admin (emails, formal replies, external communications) must include a visible disclaimer at the beginning or end:
