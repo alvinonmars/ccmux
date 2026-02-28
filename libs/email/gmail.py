@@ -33,6 +33,7 @@ import imaplib
 import logging
 import smtplib
 import sys
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -79,6 +80,7 @@ def send_email(
     references: str | None = None,
     in_reply_to: str | None = None,
     html: bool = False,
+    attachments: list[str | Path] | None = None,
     creds: dict[str, str] | None = None,
 ) -> bool:
     """Send an email via Gmail SMTP.
@@ -94,6 +96,7 @@ def send_email(
         references: Explicit References header (overrides auto-generation).
         in_reply_to: Explicit In-Reply-To header (overrides reply_to_message_id).
         html: If True, body is treated as HTML.
+        attachments: List of file paths to attach.
         creds: Credentials dict. If None, loaded from GMAIL_ENV.
 
     Returns:
@@ -130,6 +133,17 @@ def send_email(
 
     content_type = "html" if html else "plain"
     msg.attach(MIMEText(body, content_type, "utf-8"))
+
+    # Attach files
+    for filepath in (attachments or []):
+        filepath = Path(filepath)
+        if not filepath.exists():
+            log.warning("Attachment not found, skipping: %s", filepath)
+            continue
+        with open(filepath, "rb") as fh:
+            part = MIMEApplication(fh.read(), Name=filepath.name)
+        part["Content-Disposition"] = f'attachment; filename="{filepath.name}"'
+        msg.attach(part)
 
     all_recipients = list(to) + (cc or [])
 

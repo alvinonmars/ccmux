@@ -1,0 +1,29 @@
+<style>
+table {{ width: 100%; border-collapse: collapse; margin-top: 16px; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+th {{ background: #f8f9fa; text-align: left; padding: 10px 14px; font-weight: 600; font-size: 0.85em; color: #666; border-bottom: 2px solid #eee; }}
+td {{ padding: 10px 14px; border-bottom: 1px solid #f0f0f0; font-size: 0.9em; }}
+tr:last-child td {{ border-bottom: none; }}
+tr:hover {{ background: #f8faff; }}
+.size {{ color: #888; white-space: nowrap; }}
+.date {{ color: #888; white-space: nowrap; }}
+.upload-zone {{ border: 2px dashed #ccc; border-radius: 8px; padding: 30px; text-align: center; color: #888; margin: 16px 0; transition: border-color 0.2s, background 0.2s; }}
+.upload-zone.dragover {{ border-color: #2563eb; background: #f0f7ff; }}
+.upload-zone input[type=file] {{ display: none; }}
+.toolbar {{ display: flex; gap: 10px; align-items: center; margin-top: 16px; flex-wrap: wrap; }}
+.toolbar .count {{ color: #666; font-size: 0.9em; }}
+</style>
+
+{upload_form}
+
+<div class="toolbar">
+  <span class="count">{file_count} files</span>
+</div>
+
+<table>
+<thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+<tbody>
+{rows}
+</tbody>
+</table>
+
+{upload_script}

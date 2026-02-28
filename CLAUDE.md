@@ -163,6 +163,8 @@ A good AI assistant reflects on its work daily. Generate a reflection log at end
 
 **Storage**: `~/.ccmux/data/daily_reflections/YYYY-MM-DD.md`
 
+**MUST send to admin**: After writing the reflection file, send a summary to admin via WhatsApp self-chat. Include stats, highlights, mistakes, and tomorrow's agenda. This is mandatory — admin needs to see the reflection, not just have it saved to disk.
+
 **Contents**:
 1. **Daily Stats** — messages processed, response times, agent tasks run, costs
 2. **What Went Well** — timely responses, correct handling, good judgments

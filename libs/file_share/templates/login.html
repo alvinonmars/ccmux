@@ -1,0 +1,57 @@
+<style>
+.login-wrap {{ display: flex; align-items: center; justify-content: center; min-height: 60vh; }}
+.login-box {{
+  max-width: 380px;
+  width: 100%;
+  background: #1a1a2e;
+  padding: 36px 32px;
+  border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}}
+.login-box .icon {{ text-align: center; margin-bottom: 20px; font-size: 2.5em; }}
+.login-box h2 {{ margin: 0 0 8px; font-size: 1.3em; text-align: center; color: #fff; font-weight: 600; }}
+.login-box .hint {{ text-align: center; color: rgba(255,255,255,0.4); font-size: 0.85em; margin-bottom: 24px; }}
+.login-box input {{
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 8px;
+  font-size: 1em;
+  margin-bottom: 16px;
+  background: rgba(255,255,255,0.06);
+  color: #fff;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}}
+.login-box input:focus {{
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 3px rgba(96,165,250,0.2);
+}}
+.login-box input::placeholder {{ color: rgba(255,255,255,0.3); }}
+.login-box button {{
+  width: 100%;
+  padding: 12px;
+  background: linear-gradient(135deg, #2563eb, #3b82f6);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 1em;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}}
+.login-box button:hover {{ opacity: 0.9; }}
+</style>
+
+<div class="login-wrap">
+  <div class="login-box">
+    <div class="icon">&#128274;</div>
+    <h2>Protected Share</h2>
+    <div class="hint">Enter the password to continue</div>
+    {error_msg}
+    <form method="POST" action="/s/{share_id}/login?token={token}">
+      <input type="password" name="password" placeholder="Password" autofocus required>
+      <button type="submit">Unlock</button>
+    </form>
+  </div>
+</div>
