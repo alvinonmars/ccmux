@@ -149,6 +149,19 @@ def main() -> None:
         }
         _send_to_control(control_sock, payload)
 
+    elif event == "PreCompact":
+        # Context compaction is about to happen — inject recovery context
+        # so Claude can restore operational state after the summary.
+        # Runs the lightweight context recovery script in background.
+        _trigger_context_recovery(cwd)
+        payload = {
+            "type": "event",
+            "event": event,
+            "session": session_id,
+            "data": hook_data,
+        }
+        _send_to_control(control_sock, payload)
+
     elif event in (
         "SessionStart",
         "SubagentStart",
@@ -165,6 +178,36 @@ def main() -> None:
             "data": hook_data,
         }
         _send_to_control(control_sock, payload)
+
+
+def _trigger_context_recovery(cwd: str) -> None:
+    """Run the context recovery script to re-inject state after compaction.
+
+    Spawns startup_selfcheck.py as a subprocess. The script writes the
+    recovery report and pushes it to the FIFO, so Claude's first message
+    after compaction includes full operational context.
+
+    stdlib only — uses subprocess.Popen (fire-and-forget, no waiting).
+    """
+    import subprocess
+
+    script = Path(cwd) / "scripts" / "startup_selfcheck.py"
+    venv_python = Path(cwd) / ".venv" / "bin" / "python3"
+
+    if not script.exists():
+        return
+
+    python = str(venv_python) if venv_python.exists() else sys.executable
+
+    try:
+        subprocess.Popen(
+            [python, str(script)],
+            cwd=cwd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass  # hook must never block Claude
 
 
 if __name__ == "__main__":

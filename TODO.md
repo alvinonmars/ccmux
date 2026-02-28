@@ -17,6 +17,8 @@ Single source of truth for all engineering tasks. Referenced by CLAUDE.md.
 | 9 | Persistent pending task tracker | Medium | Done | Implemented ccmux/pending_tasks.py. JSONL-backed tracker with add/update/close/overdue. 5 unit tests. File: ~/.ccmux/data/pending_tasks.jsonl. |
 | 10 | Remove out.* FIFO mechanism | Medium | Done | Dead code removed. Commit c04af83. Deleted mcp_server.py, removed mcp_port/mcp_url from config, removed output FIFO watcher callbacks, simplified daemon entrypoint. 247 tests pass. |
 | 11 | Multi-agent architecture (v2) | Low | Design | Multiple ccmux instances (one per role/project). Personal assistant = current ccmux (WhatsApp). Project sessions = new ccmux instances (Slack). Inter-instance comm via in FIFOs. See docs/architecture-v2-multi-agent.md. |
+| 12 | Consolidate assistant identity under ~/.ccmux/ | High | TODO | All non-git config (private CLAUDE.md, ccmux.toml, .mcp.json) should live under ~/.ccmux/config/ with symlinks from project dir. Goal: `rsync ~/.ccmux/` = full assistant migration. Also: hook.py context compaction detection + auto state re-injection. |
+| 13 | Hook-based context compaction recovery | High | TODO | hook.py detects "continued from a previous conversation" in transcript → auto re-injects selfcheck report + pending tasks via FIFO. Closes the gap where runtime context loss has no recovery trigger. |
 
 ## Completed
 
