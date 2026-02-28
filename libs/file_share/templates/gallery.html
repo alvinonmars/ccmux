@@ -118,12 +118,13 @@
   color: rgba(255,255,255,0.6); font-size: 0.85em; width: 100%;
   background: rgba(0,0,0,0.5);
 }}
-.lightbox .bottom-bar a {{
+.lightbox .bottom-bar a, .lightbox .bottom-bar button {{
   color: #60a5fa; padding: 6px 14px;
   border: 1px solid rgba(96,165,250,0.4); border-radius: 6px; font-size: 0.9em;
-  transition: background 0.2s;
+  transition: background 0.2s; background: transparent; cursor: pointer;
+  font-family: inherit;
 }}
-.lightbox .bottom-bar a:hover {{ background: rgba(96,165,250,0.15); text-decoration: none; }}
+.lightbox .bottom-bar a:hover, .lightbox .bottom-bar button:hover {{ background: rgba(96,165,250,0.15); text-decoration: none; }}
 @media (max-width: 640px) {{
   .lightbox .nav {{ font-size: 1.8em; padding: 12px 8px; }}
   .lightbox img {{ max-width: 100vw; max-height: 75vh; border-radius: 0; }}
@@ -151,6 +152,7 @@
   <div class="bottom-bar">
     <span id="lb-name"></span>
     <span id="lb-idx"></span>
+    <button id="lb-save" onclick="savePhoto()">Save to Photos</button>
     <a id="lb-dl" href="" download>Download</a>
   </div>
 </div>
@@ -236,6 +238,36 @@ function closeLightbox() {{
 function navLightbox(dir) {{
   curIdx = (curIdx + dir + allFiles.length) % allFiles.length;
   openLightbox(curIdx);
+}}
+async function savePhoto() {{
+  const file = allFiles[curIdx];
+  const btn = document.getElementById('lb-save');
+  btn.textContent = 'Saving...';
+  try {{
+    const resp = await fetch(file.url);
+    const blob = await resp.blob();
+    if (navigator.share && navigator.canShare) {{
+      const f = new File([blob], file.name, {{ type: blob.type }});
+      if (navigator.canShare({{ files: [f] }})) {{
+        await navigator.share({{ files: [f] }});
+        btn.textContent = 'Shared!';
+        setTimeout(() => btn.textContent = 'Save to Photos', 1500);
+        return;
+      }}
+    }}
+    // Fallback: create object URL and open in new tab (allows long-press save)
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = file.name;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    btn.textContent = 'Downloaded!';
+    setTimeout(() => btn.textContent = 'Save to Photos', 1500);
+  }} catch(e) {{
+    if (e.name !== 'AbortError') btn.textContent = 'Save to Photos';
+    else btn.textContent = 'Save to Photos';
+  }}
 }}
 document.addEventListener('keydown', e => {{
   const lb = document.getElementById('lightbox');
