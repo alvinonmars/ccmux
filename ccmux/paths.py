@@ -40,6 +40,7 @@ CHAT_HISTORY = HOUSEHOLD_DIR / "chat_history.jsonl"
 # Household sub-directories
 BUTLER_DIR = HOUSEHOLD_DIR / "butler"
 ANNOUNCEMENTS_DIR = BUTLER_DIR / "announcements"
+WA_NOTIFIER_STATE = DATA_ROOT / "wa_notifier_state.json"
 HEALTH_DIR = HOUSEHOLD_DIR / "health"
 RECEIPTS_DIR = HOUSEHOLD_DIR / "receipts"
 HOMEWORK_DIR = HOUSEHOLD_DIR / "homework"

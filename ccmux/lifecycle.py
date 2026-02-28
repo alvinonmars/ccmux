@@ -15,7 +15,7 @@ from ccmux.config import Config
 
 log = structlog.get_logger(__name__)
 
-_CLAUDE_BASE_CMD = "claude --dangerously-skip-permissions --continue"
+_CLAUDE_BASE_CMD = "claude --continue"
 
 
 class LifecycleManager:

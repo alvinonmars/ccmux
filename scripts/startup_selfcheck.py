@@ -499,7 +499,11 @@ def build_report() -> str:
         f"\U0001f512 Proxy: {proxy_status}\n\n"
         f"\U0001f433 Docker:\n{docker_status}\n\n"
         f"\U0001f4be Disk:\n{disk_report}\n\n"
-        f"\U0001f4e8 Messages:{message_gap_report}"
+        f"\U0001f4e8 Messages:{message_gap_report}\n\n"
+        "IMPORTANT: After sending this report, scan for missed messages during the gap window. "
+        "Use list_messages with after= parameter set to the last scan timestamp shown above. "
+        "Check all monitored chats: admin self-chat, household group, and contact chats. "
+        "Reprocess any missed actionable messages (S3 commands, admin instructions, health reports)."
     )
 
     return content

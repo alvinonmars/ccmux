@@ -1,13 +1,13 @@
 """ccmux daemon — main orchestrator.
 
-Startup sequence (per spec):
+Startup sequence:
 1. Environment check (HTTP proxy warning)
 2. Hook installation
-3. MCP server start
-4. MCP config write (.mcp.json)
-5. tmux session handling
-6. pipe-pane mount
-7. Directory watcher start
+3. Pub/sub servers (control.sock, output.sock)
+4. FIFO manager + directory watcher
+5. tmux session handling (create or reattach)
+6. pipe-pane mount for stdout monitoring
+7. Lifecycle manager (crash detection + restart)
 """
 from __future__ import annotations
 
@@ -183,7 +183,7 @@ class Daemon:
             pane = session.active_window.active_pane
             pane.send_keys(
                 f"{_proxy_env_prefix(self.cfg)}CCMUX_CONTROL_SOCK={self.cfg.control_sock} "
-                f"claude --dangerously-skip-permissions",
+                f"claude --continue",
                 enter=True,
             )
         else:

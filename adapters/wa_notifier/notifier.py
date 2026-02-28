@@ -75,6 +75,7 @@ class WhatsAppNotifier:
                     # Advance high-water mark only after successful delivery
                     if new_ts:
                         self.last_seen_ts = new_ts
+                        self._persist_last_seen()
                 except sqlite3.Error as exc:
                     log.warning("SQLite query failed: %s", exc)
                 except OSError as exc:
@@ -92,13 +93,30 @@ class WhatsAppNotifier:
         self._running = False
 
     def _init_last_seen(self) -> None:
-        """Read max(timestamp) from the DB so we use the bridge's own format.
+        """Restore high-water mark from persistent state file, falling back to DB.
 
-        If the DB is empty or unreadable, fall back to a sentinel that is
-        lexicographically smaller than any real timestamp ("").
+        Priority: state file > DB max(timestamp) > empty string.
+        The state file is written after every successful delivery cycle,
+        so on restart we resume from where we left off — delivering any
+        messages received during downtime.
         """
         if self.last_seen_ts:
             return  # already set (e.g. by test)
+
+        # 1. Try persistent state file (survives reboot)
+        from ccmux.paths import WA_NOTIFIER_STATE
+        if WA_NOTIFIER_STATE.exists():
+            try:
+                state = json.loads(WA_NOTIFIER_STATE.read_text())
+                saved_ts = state.get("last_seen_ts", "")
+                if saved_ts:
+                    self.last_seen_ts = saved_ts
+                    log.info("Restored last_seen_ts from state file: %s", saved_ts)
+                    return
+            except (json.JSONDecodeError, OSError) as exc:
+                log.warning("Could not read state file: %s", exc)
+
+        # 2. Fallback: DB max(timestamp) — only for first-ever startup
         try:
             conn = sqlite3.connect(
                 f"file:{self.cfg.db_path}?mode=ro", uri=True, timeout=5.0,
@@ -109,15 +127,25 @@ class WhatsAppNotifier:
                 ).fetchone()
                 if row and row[0]:
                     self.last_seen_ts = row[0]
+                    log.info("Initialized last_seen_ts from DB: %s", self.last_seen_ts)
                     return
             finally:
                 conn.close()
         except sqlite3.Error as exc:
             log.warning("Could not read initial timestamp: %s", exc)
-        # DB empty or unreadable — empty string is < any real timestamp,
-        # but _query_new_messages will just return everything (which is
-        # then ignored since there's nothing truly "new").
         self.last_seen_ts = ""
+
+    def _persist_last_seen(self) -> None:
+        """Write current high-water mark to disk for crash/reboot recovery."""
+        from ccmux.paths import WA_NOTIFIER_STATE
+        try:
+            WA_NOTIFIER_STATE.parent.mkdir(parents=True, exist_ok=True)
+            WA_NOTIFIER_STATE.write_text(json.dumps({
+                "last_seen_ts": self.last_seen_ts,
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            }))
+        except OSError as exc:
+            log.warning("Could not persist state: %s", exc)
 
     def _ensure_fifo(self) -> None:
         """Create the input FIFO if it does not exist."""
