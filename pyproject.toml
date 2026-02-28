@@ -9,12 +9,14 @@ dependencies = [
     "mcp",
     "uvicorn",
     "starlette",
+    "pycryptodome",
 ]
 
 [project.scripts]
 ccmux = "ccmux.daemon:main"
 ccmux-wa-notifier = "adapters.wa_notifier.__main__:main"
 ccmux-deploy = "ccmux.reconcile:main"
+ccmux-wework-notifier = "adapters.wework_notifier.__main__:main"
 
 [project.optional-dependencies]
 dev = [

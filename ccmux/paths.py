@@ -56,6 +56,12 @@ SECURITY_AUDIT_DIR = DATA_ROOT / "security_audit"
 
 POWERSCHOOL_ENV = SECRETS_ROOT / "powerschool.env"
 GMAIL_ENV = SECRETS_ROOT / "gmail.env"
+WEWORK_ENV = SECRETS_ROOT / "wework.env"
+WEWORK_CALLBACK_ENV = SECRETS_ROOT / "wework_callback.env"
+
+# WeWork data
+WEWORK_DIR = DATA_ROOT / "wework"
+WEWORK_MESSAGES = WEWORK_DIR / "messages.jsonl"
 
 
 def load_s3_whitelist() -> frozenset[str]:
@@ -89,5 +95,6 @@ def ensure_dirs() -> None:
         EMAIL_SCAN_DIR,
         GMAIL_SCAN_DIR,
         SECURITY_AUDIT_DIR,
+        WEWORK_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)
