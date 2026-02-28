@@ -625,6 +625,13 @@ class TestNotificationParseContract:
 
 
 class TestInitLastSeen:
+    @pytest.fixture(autouse=True)
+    def _no_real_state_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Redirect WA_NOTIFIER_STATE to tmp_path so tests don't read the real file."""
+        monkeypatch.setattr(
+            "ccmux.paths.WA_NOTIFIER_STATE", tmp_path / "wa_notifier_state.json",
+        )
+
     def test_reads_max_timestamp_from_db(self, tmp_path: Path) -> None:
         """_init_last_seen() should set last_seen_ts to max(timestamp) from DB."""
         db_path = tmp_path / "messages.db"

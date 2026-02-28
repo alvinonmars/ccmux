@@ -461,10 +461,112 @@ def check_message_gap() -> str:
     return "\n  ".join([""] + parts).rstrip()
 
 
+# --- Check: Pending Tasks ----------------------------------------------------
+
+def check_pending_tasks() -> str:
+    """Load and display all open pending tasks from the persistent tracker."""
+    try:
+        from ccmux.pending_tasks import PendingTaskTracker
+        tracker = PendingTaskTracker()
+        open_tasks = tracker.list_open()
+        overdue = tracker.overdue()
+
+        if not open_tasks:
+            return "  \u2705 No open pending tasks"
+
+        lines = []
+        overdue_ids = {t.task_id for t in overdue}
+        for t in open_tasks:
+            icon = "\u26a0\ufe0f OVERDUE" if t.task_id in overdue_ids else f"[{t.status}]"
+            lines.append(
+                f"  - {icon} {t.task_id}: {t.description}"
+                + (f" (note: {t.note})" if t.note else "")
+                + (f" (follow-up: {t.follow_up_hours}h)" if t.follow_up_hours else "")
+                + f" (created: {t.created_at[:16]})"
+            )
+
+        header = f"  {len(open_tasks)} open task(s)"
+        if overdue:
+            header += f", \u26a0\ufe0f {len(overdue)} OVERDUE"
+        return header + "\n" + "\n".join(lines)
+    except Exception as exc:
+        return f"  \u274c Could not load pending tasks: {exc}"
+
+
+# --- Check: Context Recovery -------------------------------------------------
+
+def check_context_recovery() -> str:
+    """Load recent family context and last reflection for behavioral recovery."""
+    parts = []
+
+    # Last daily reflection
+    try:
+        from ccmux.paths import DAILY_REFLECTIONS_DIR
+        if DAILY_REFLECTIONS_DIR.exists():
+            reflections = sorted(DAILY_REFLECTIONS_DIR.iterdir(), reverse=True)
+            if reflections:
+                last = reflections[0]
+                # Read first 500 chars of the most recent reflection
+                text = last.read_text()[:500]
+                parts.append(f"  Last reflection ({last.name}):\n    {text.strip()[:300]}...")
+            else:
+                parts.append("  No daily reflections found")
+        else:
+            parts.append("  Reflections directory missing")
+    except Exception as exc:
+        parts.append(f"  Could not load reflections: {exc}")
+
+    # Recent family context (last 10 entries)
+    try:
+        from ccmux.paths import FAMILY_CONTEXT
+        if FAMILY_CONTEXT.exists():
+            lines = FAMILY_CONTEXT.read_text().strip().splitlines()
+            recent = lines[-10:] if len(lines) > 10 else lines
+            parts.append(f"  Family context: {len(lines)} total entries, last {len(recent)}:")
+            for line in recent:
+                try:
+                    entry = json.loads(line)
+                    key = entry.get("key", "?")
+                    val = entry.get("value", "?")[:80]
+                    parts.append(f"    - [{entry.get('category', '?')}] {key}: {val}")
+                except json.JSONDecodeError:
+                    continue
+        else:
+            parts.append("  Family context file missing")
+    except Exception as exc:
+        parts.append(f"  Could not load family context: {exc}")
+
+    # Health tracking last entries (discover children dynamically)
+    try:
+        from ccmux.paths import HEALTH_DIR
+        if HEALTH_DIR.is_dir():
+            for child_dir in sorted(HEALTH_DIR.iterdir()):
+                if not child_dir.is_dir():
+                    continue
+                poo_log = child_dir / "poo_log.jsonl"
+                if poo_log.exists():
+                    lines = poo_log.read_text().strip().splitlines()
+                    if lines:
+                        last = json.loads(lines[-1])
+                        parts.append(
+                            f"  Health ({child_dir.name}): last poo {last.get('date', '?')}, "
+                            f"status={last.get('status', '?')}"
+                        )
+    except Exception as exc:
+        parts.append(f"  Could not load health data: {exc}")
+
+    if not parts:
+        return "  No context data available"
+    return "\n".join(parts)
+
+
 # --- Build Report & Send -----------------------------------------------------
 
+SELFCHECK_REPORT_PATH = STATE_DIR / "selfcheck_report.txt"
+
+
 def build_report() -> str:
-    """Run all checks and build the full report string."""
+    """Run all checks, write full report to file, return a short FIFO message."""
     boot_time = NOW.strftime("%Y-%m-%d %H:%M:%S")
 
     print("[startup_selfcheck] Checking services...")
@@ -488,25 +590,50 @@ def build_report() -> str:
     print("[startup_selfcheck] Checking message gap...")
     message_gap_report = check_message_gap()
 
-    content = (
-        "Startup self-check completed. Send the following report to admin via WhatsApp self-chat "
-        "(use send_message tool, prefix with \U0001f916). Break into multiple messages if needed.\n\n"
-        f"\U0001f916 System Self-Check Report\n"
+    print("[startup_selfcheck] Checking pending tasks...")
+    pending_tasks_report = check_pending_tasks()
+
+    print("[startup_selfcheck] Loading context recovery...")
+    context_recovery = check_context_recovery()
+
+    full_report = (
+        f"System Self-Check Report\n"
         f"Boot time: {boot_time}\n\n"
-        f"\U0001f4e1 Services:\n{services_report}\n\n"
-        f"\u23f0 Timers:\n{timers_report}\n\n"
-        f"\U0001f5a5\ufe0f Tmux: {tmux_status}\n\n"
-        f"\U0001f512 Proxy: {proxy_status}\n\n"
-        f"\U0001f433 Docker:\n{docker_status}\n\n"
-        f"\U0001f4be Disk:\n{disk_report}\n\n"
-        f"\U0001f4e8 Messages:{message_gap_report}\n\n"
-        "IMPORTANT: After sending this report, scan for missed messages during the gap window. "
-        "Use list_messages with after= parameter set to the last scan timestamp shown above. "
-        "Check all monitored chats: admin self-chat, household group, and contact chats. "
-        "Reprocess any missed actionable messages (S3 commands, admin instructions, health reports)."
+        f"Services:\n{services_report}\n\n"
+        f"Timers:\n{timers_report}\n\n"
+        f"Tmux: {tmux_status}\n\n"
+        f"Proxy: {proxy_status}\n\n"
+        f"Docker:\n{docker_status}\n\n"
+        f"Disk:\n{disk_report}\n\n"
+        f"Messages:{message_gap_report}\n\n"
+        f"Pending Tasks:\n{pending_tasks_report}\n\n"
+        f"Context Recovery:\n{context_recovery}\n\n"
+        "RECOVERY ACTIONS (execute in order):\n"
+        "1. Review all pending tasks above. Follow up on any that are overdue.\n"
+        "2. Scan for missed messages during the gap window using list_messages "
+        "with after= parameter set to the last scan timestamp.\n"
+        "3. Check household group, admin self-chat, and contact chats.\n"
+        "4. Reprocess any missed actionable messages (S3 commands, admin instructions, health reports).\n"
+        "5. Send the self-check report to admin via WhatsApp.\n"
+        "6. Resume normal operations."
     )
 
-    return content
+    # Write full report to file (may exceed PIPE_BUF, so send via file)
+    SELFCHECK_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SELFCHECK_REPORT_PATH.write_text(full_report)
+    print(f"[startup_selfcheck] Full report written to {SELFCHECK_REPORT_PATH}")
+
+    # FIFO message is short — just tells Claude to read the file
+    fifo_msg = (
+        "Startup self-check completed. "
+        f"Full report saved to: {SELFCHECK_REPORT_PATH}\n"
+        "READ the report file, then:\n"
+        "1. Send a summary to admin via WhatsApp (prefix with \U0001f916)\n"
+        "2. Execute all RECOVERY ACTIONS listed in the report\n"
+        "3. Resume normal operations"
+    )
+
+    return fifo_msg
 
 
 def main() -> None:
