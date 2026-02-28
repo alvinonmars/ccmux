@@ -12,7 +12,6 @@ Startup sequence (per spec):
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import signal
@@ -30,7 +29,6 @@ from ccmux.fifo import FifoManager, Message
 from ccmux.hooks_manager import install as install_hooks
 from ccmux.injector import InjectionTimeout, async_inject_messages
 from ccmux.lifecycle import LifecycleManager
-from ccmux.mcp_server import create_server, run_server
 from ccmux.pubsub import ControlServer, OutputBroadcaster
 from ccmux.watcher import DirectoryWatcher
 
@@ -53,11 +51,8 @@ def _configure_logging(runtime_dir: Path) -> None:
 class Daemon:
     """The ccmux daemon orchestrates all components."""
 
-    def __init__(
-        self, cfg: Config, mcp_ready: Optional[asyncio.Event] = None
-    ) -> None:
+    def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self._mcp_ready = mcp_ready
         self._message_queue: list[Message] = []
         self._permission_detected: bool = False
         self._current_session_id: Optional[str] = None
@@ -88,13 +83,6 @@ class Daemon:
         install_hooks(self.cfg)
         log.info("hooks installed", hook_script=str(self.cfg.hook_script))
 
-        # Wait for MCP server to bind its port before advertising the URL.
-        if self._mcp_ready is not None:
-            await self._mcp_ready.wait()
-
-        _write_mcp_config(self.cfg)
-        log.info("MCP config written", url=self.cfg.mcp_url)
-
         # Start pub/sub servers
         self._broadcaster = OutputBroadcaster(self.cfg.output_sock)
         await self._broadcaster.start()
@@ -117,8 +105,6 @@ class Daemon:
             loop,
             on_input_add=self._on_fifo_add,
             on_input_remove=self._on_fifo_remove,
-            on_output_add=None,
-            on_output_remove=None,
         )
         self._watcher.start()
         self._watcher.scan_existing()
@@ -479,59 +465,16 @@ def _warn_proxy(cfg: Config) -> None:
         log.warning("claude_proxy not set (ccmux.toml [claude].proxy); Claude may not connect")
 
 
-def _write_mcp_config(cfg: Config) -> None:
-    """Write MCP server address into project-level .mcp.json.
-
-    Project-level .mcp.json is only visible to Claude instances running in
-    this project directory, avoiding pollution of global ~/.claude.json.
-    """
-    mcp_json = cfg.project_root / ".mcp.json"
-    data: dict = {}
-    if mcp_json.exists():
-        try:
-            data = json.loads(mcp_json.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    data.setdefault("mcpServers", {})["ccmux"] = {
-        "type": "sse",
-        "url": cfg.mcp_url,
-    }
-    mcp_json.write_text(json.dumps(data, indent=2) + "\n")
-
-
 # ------------------------------------------------------------------
 # Entrypoint
 # ------------------------------------------------------------------
 
 
-async def _run_daemon_and_mcp(cfg: Config) -> None:
-    """Run the daemon alongside the MCP server."""
-    mcp_ready = asyncio.Event()
-    mcp_shutdown = asyncio.Event()
-    daemon = Daemon(cfg, mcp_ready=mcp_ready)
-    mcp = create_server(cfg.runtime_dir)
-
-    mcp_task = asyncio.create_task(
-        run_server(
-            mcp,
-            host="127.0.0.1",
-            port=cfg.mcp_port,
-            ready_event=mcp_ready,
-            shutdown_event=mcp_shutdown,
-        )
-    )
-    try:
-        await daemon.run()
-    finally:
-        mcp_shutdown.set()
-        await mcp_task
-
-
 def main() -> None:
     """CLI entrypoint: ccmux start"""
     cfg = config_module.load()
-    asyncio.run(_run_daemon_and_mcp(cfg))
+    daemon = Daemon(cfg)
+    asyncio.run(daemon.run())
 
 
 if __name__ == "__main__":

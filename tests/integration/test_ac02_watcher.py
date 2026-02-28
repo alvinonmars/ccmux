@@ -5,16 +5,12 @@ Layer: Integration/mock — daemon only.
 Tests:
   T-02-1: creating in.test after watcher starts → message received
   T-02-2: deleting in.temp → daemon does not crash
-  T-02-3: out.test exists + send_to_channel("test", msg) → message written; adapter reads it
-  T-02-4: out.nonexist absent → send_to_channel returns error; no crash; warning logged
 """
 import asyncio
-import logging
 import os
 from pathlib import Path
 
 from ccmux.fifo import FifoManager
-from ccmux.mcp_server import _send_to_channel
 from ccmux.watcher import DirectoryWatcher
 from ccmux.injector import Message
 
@@ -81,32 +77,3 @@ async def test_T02_2_fifo_removal_does_not_crash(test_config):
 
     watcher.stop()
     mgr.stop_all()
-
-
-async def test_T02_3_output_fifo_write(test_config):
-    """T-02-3: out.test exists + send_to_channel("test", msg) → message written; adapter reads it."""
-    fifo_path = test_config.runtime_dir / "out.test"
-    os.mkfifo(str(fifo_path))
-
-    # Open reader end to simulate the adapter (O_RDONLY | O_NONBLOCK opens without blocking)
-    read_fd = os.open(str(fifo_path), os.O_RDONLY | os.O_NONBLOCK)
-    try:
-        result = await _send_to_channel(test_config.runtime_dir, "test", "hello")
-        assert result == "ok"
-
-        data = os.read(read_fd, 1024)
-        assert data == b"hello\n"
-    finally:
-        os.close(read_fd)
-
-
-async def test_T02_4_output_fifo_not_found(test_config, caplog):
-    """T-02-4: out.nonexist absent → send_to_channel returns error; warning logged; no crash."""
-    assert not (test_config.runtime_dir / "out.nonexist").exists()
-
-    with caplog.at_level(logging.WARNING, logger="ccmux.mcp_server"):
-        result = await _send_to_channel(test_config.runtime_dir, "nonexist", "msg")
-
-    assert result.startswith("Error:")
-    assert "nonexist" in result
-    assert any("channel not found" in r.message for r in caplog.records)

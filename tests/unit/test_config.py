@@ -14,7 +14,6 @@ def test_load_defaults(tmp_path):
     assert cfg.runtime_dir == Path("/tmp/ccmux")
     assert cfg.idle_threshold == 30
     assert cfg.silence_timeout == 3
-    assert cfg.mcp_port == 9876
     assert cfg.backoff_initial == 1
     assert cfg.backoff_cap == 60
     assert cfg.project_root == tmp_path.resolve()
@@ -26,7 +25,6 @@ def test_load_from_toml(tmp_path):
         "[project]\nname = \"myproject\"\n"
         "[runtime]\ndir = \"/var/run/ccmux\"\n"
         "[timing]\nidle_threshold = 10\nsilence_timeout = 2\n"
-        "[mcp]\nport = 8888\n"
         "[recovery]\nbackoff_initial = 2\nbackoff_cap = 30\n"
     )
     cfg = load(tmp_path)
@@ -34,7 +32,6 @@ def test_load_from_toml(tmp_path):
     assert cfg.runtime_dir == Path("/var/run/ccmux")
     assert cfg.idle_threshold == 10
     assert cfg.silence_timeout == 2
-    assert cfg.mcp_port == 8888
     assert cfg.backoff_initial == 2
     assert cfg.backoff_cap == 30
 
@@ -59,16 +56,9 @@ def test_derived_paths(tmp_path):
     assert cfg.hook_script == tmp_path.resolve() / "ccmux" / "hook.py"
 
 
-def test_mcp_url(tmp_path):
-    (tmp_path / "ccmux.toml").write_text("[mcp]\nport = 1234\n")
-    cfg = load(tmp_path)
-    assert cfg.mcp_url == "http://127.0.0.1:1234/sse"
-
-
 def test_partial_toml(tmp_path):
     """Only some sections present; others fall back to defaults."""
     (tmp_path / "ccmux.toml").write_text("[timing]\nsilence_timeout = 5\n")
     cfg = load(tmp_path)
     assert cfg.silence_timeout == 5
-    assert cfg.mcp_port == 9876  # default
     assert cfg.idle_threshold == 30  # default

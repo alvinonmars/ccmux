@@ -55,7 +55,6 @@ def test_config(tmp_path: Path) -> Config:
         runtime_dir=runtime,
         idle_threshold=30,
         silence_timeout=1,          # short for tests
-        mcp_port=_free_port(),
         backoff_initial=1,
         backoff_cap=10,
         project_root=REPO_ROOT,

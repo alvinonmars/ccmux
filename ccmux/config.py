@@ -21,7 +21,6 @@ class Config:
     runtime_dir: Path
     idle_threshold: int
     silence_timeout: int
-    mcp_port: int
     backoff_initial: int
     backoff_cap: int
     project_root: Path
@@ -45,10 +44,6 @@ class Config:
         return self.project_root / "ccmux" / "hook.py"
 
     @property
-    def mcp_url(self) -> str:
-        return f"http://127.0.0.1:{self.mcp_port}/sse"
-
-    @property
     def stdout_log(self) -> Path:
         return self.runtime_dir / "stdout.log"
 
@@ -67,7 +62,6 @@ def load(project_root: Path | None = None) -> Config:
     project = data.get("project", {})
     runtime = data.get("runtime", {})
     timing = data.get("timing", {})
-    mcp = data.get("mcp", {})
     recovery = data.get("recovery", {})
     claude = data.get("claude", {})
 
@@ -82,7 +76,6 @@ def load(project_root: Path | None = None) -> Config:
         runtime_dir=Path(runtime.get("dir", "/tmp/ccmux")),
         idle_threshold=timing.get("idle_threshold", 30),
         silence_timeout=timing.get("silence_timeout", 3),
-        mcp_port=mcp.get("port", 9876),
         backoff_initial=recovery.get("backoff_initial", 1),
         backoff_cap=recovery.get("backoff_cap", 60),
         project_root=project_root.resolve(),
