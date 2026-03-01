@@ -68,8 +68,8 @@ def main() -> None:
         req.add_header("Authorization", f"Basic {cred}")
         try:
             urllib.request.urlopen(req, timeout=10)
-        except Exception:
-            pass  # Best-effort, never block Claude
+        except Exception as e:
+            print(f"zulip_relay_hook: post failed: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

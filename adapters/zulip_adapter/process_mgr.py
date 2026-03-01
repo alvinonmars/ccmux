@@ -203,8 +203,8 @@ class ProcessManager:
             stream, topic, session,
         )
 
-        # 1. Create instance.toml in config directory
-        instance_dir = self.cfg.streams_dir / stream / topic
+        # 1. Create instance.toml in config directory (sanitized to prevent path traversal)
+        instance_dir = self.cfg.streams_dir / _sanitize_name(stream) / _sanitize_name(topic)
         instance_dir.mkdir(parents=True, exist_ok=True)
         instance_toml = instance_dir / "instance.toml"
         if not instance_toml.exists():

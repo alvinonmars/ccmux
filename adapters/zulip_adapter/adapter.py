@@ -124,8 +124,9 @@ class ZulipAdapter:
         )
 
         if result.get("result") != "success":
+            code = result.get("code", "")
             msg = result.get("msg", "")
-            if "BAD_EVENT_QUEUE_ID" in msg:
+            if code == "BAD_EVENT_QUEUE_ID":
                 raise ConnectionError("Event queue expired, need re-register")
             raise ConnectionError(f"get_events failed: {msg}")
 
@@ -159,8 +160,14 @@ class ZulipAdapter:
             fd = os.open(str(fifo_path), os.O_WRONLY | os.O_NONBLOCK)
             try:
                 data = (message + "\n").encode("utf-8")
-                os.write(fd, data)
-                return True
+                total = len(data)
+                written = 0
+                while written < total:
+                    n = os.write(fd, data[written:])
+                    if n == 0:
+                        break
+                    written += n
+                return written == total
             finally:
                 os.close(fd)
         except OSError as e:
@@ -224,6 +231,7 @@ class ZulipAdapter:
     async def run(self) -> None:
         """Main event loop: register queue, long-poll, route messages."""
         backoff = INITIAL_BACKOFF
+        self._queue_id: str | None = None
 
         while self._running:
             try:
@@ -231,6 +239,7 @@ class ZulipAdapter:
                 queue_id, last_event_id = await asyncio.get_event_loop().run_in_executor(
                     None, self._register_event_queue
                 )
+                self._queue_id = queue_id
                 log.info("Event queue registered: %s", queue_id)
                 backoff = INITIAL_BACKOFF  # Reset on success
 
@@ -256,7 +265,16 @@ class ZulipAdapter:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, MAX_BACKOFF)
 
+    def _delete_event_queue(self, queue_id: str) -> None:
+        """Delete the event queue to unblock the long-poll immediately."""
+        self._api_call("DELETE", f"/events?queue_id={queue_id}", timeout=5)
+
     def stop(self) -> None:
-        """Signal the adapter to stop."""
+        """Signal the adapter to stop. Deletes event queue to unblock long-poll."""
         self._running = False
+        if hasattr(self, "_queue_id") and self._queue_id:
+            try:
+                self._delete_event_queue(self._queue_id)
+            except Exception:
+                pass
         self.process_mgr.stop_all()

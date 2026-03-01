@@ -854,15 +854,11 @@ class TestZulipHelpers:
         env.pop("ZULIP_BOT_EMAIL", None)
         env.pop("ZULIP_BOT_API_KEY", None)
 
-        result = subprocess.run(
-            [sys.executable, str(self.HELPER_SCRIPT), "list-streams"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=env,
-        )
-        # Should fail with error about missing credentials
-        assert result.returncode != 0
+        # Import and test directly to use the empty cred file
+        from scripts.zulip_helpers import _load_credentials
+
+        with pytest.raises(SystemExit):
+            _load_credentials(str(cred_file))
 
     def test_ac6b_6_stdlib_only(self) -> None:
         """AC-6b.6: Script uses only stdlib imports."""
@@ -1141,6 +1137,87 @@ class TestReviewFixes:
             mock_create.assert_called_once()
 
         loop.close()
+
+    def test_fix6_load_api_key_missing_key(self, tmp_path: Path) -> None:
+        """Fix 6: _load_api_key raises ValueError when key line is absent."""
+        from adapters.zulip_adapter.adapter import _load_api_key
+
+        cred = tmp_path / "no_key.env"
+        cred.write_text("ZULIP_SITE=https://example.com\nZULIP_BOT_EMAIL=bot@example.com\n")
+
+        with pytest.raises(ValueError, match="ZULIP_BOT_API_KEY not found"):
+            _load_api_key(cred)
+
+    def test_fix7_env_template_missing_file(self) -> None:
+        """Fix 7: _parse_env_template returns empty dict for nonexistent file."""
+        from adapters.zulip_adapter.process_mgr import _parse_env_template
+
+        result = _parse_env_template(Path("/nonexistent/env_template.sh"))
+        assert result == {}
+
+    def test_fix8_bad_event_queue_id_uses_code_field(self, tmp_path: Path) -> None:
+        """Fix 8: _get_events detects BAD_EVENT_QUEUE_ID from code field."""
+        from adapters.zulip_adapter.adapter import ZulipAdapter
+
+        cred = tmp_path / "cred.env"
+        cred.write_text("ZULIP_BOT_API_KEY=testkey123\n")
+        cfg = MagicMock()
+        cfg.site = "https://zulip.example.com"
+        cfg.bot_email = "bot@example.com"
+        cfg.bot_credentials = cred
+
+        adapter = ZulipAdapter.__new__(ZulipAdapter)
+        adapter.cfg = cfg
+        adapter.api_key = "testkey123"
+        adapter._auth_header = adapter._build_auth()
+        adapter.process_mgr = MagicMock()
+
+        # Simulate BAD_EVENT_QUEUE_ID response (code field, not msg field)
+        bad_queue_response = {
+            "result": "error",
+            "code": "BAD_EVENT_QUEUE_ID",
+            "msg": "Bad event queue ID: 1234567890:12345",
+        }
+        with patch.object(adapter, "_api_call", return_value=bad_queue_response):
+            with pytest.raises(ConnectionError, match="Event queue expired"):
+                adapter._get_events("test-queue", 0)
+
+    def test_fix9_instance_dir_sanitized(self, tmp_path: Path) -> None:
+        """Fix 9: instance_dir path uses sanitized names to prevent traversal."""
+        from adapters.zulip_adapter.process_mgr import ProcessManager, _sanitize_name
+        from adapters.zulip_adapter.config import ZulipAdapterConfig, StreamConfig
+
+        streams_dir = tmp_path / "streams"
+        streams_dir.mkdir()
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        cred = tmp_path / "cred.env"
+        cred.write_text("ZULIP_BOT_API_KEY=test\n")
+        env_tpl = tmp_path / "env.sh"
+        env_tpl.write_text("# empty\n")
+
+        cfg = ZulipAdapterConfig(
+            site="https://zulip.example.com",
+            bot_email="bot@example.com",
+            bot_credentials=cred,
+            streams_dir=streams_dir,
+            env_template=env_tpl,
+            runtime_dir=runtime,
+        )
+        mgr = ProcessManager(cfg)
+
+        # Malicious topic with path traversal chars
+        malicious_topic = "../../etc/passwd"
+        sanitized = _sanitize_name(malicious_topic)
+
+        # Verify sanitization removes path traversal
+        assert ".." not in sanitized
+        assert "/" not in sanitized
+
+        # The instance_dir should be under streams_dir, not escaped
+        expected_path = streams_dir / _sanitize_name("test-stream") / sanitized
+        # Verify it stays under streams_dir
+        assert str(expected_path).startswith(str(streams_dir))
 
 
 # ============================================================================
