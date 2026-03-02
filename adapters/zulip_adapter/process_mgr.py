@@ -130,6 +130,11 @@ def _parse_env_template(template_path: Path) -> dict[str, str]:
         # Skip template placeholders like ${STREAM_NAME}
         if "${" in value:
             continue
+        # Expand ~ to absolute home path — tmux -e does not expand tildes,
+        # and subprocess environments may lack HOME, breaking expanduser()
+        # inside hooks.
+        if value.startswith("~/"):
+            value = os.path.expanduser(value)
         env[key] = value
 
     return env
@@ -299,6 +304,7 @@ class ProcessManager:
         # Set per-instance values
         env_vars["ZULIP_STREAM"] = stream
         env_vars["ZULIP_TOPIC"] = topic
+        env_vars["ZULIP_PROJECT_PATH"] = str(project_path)
 
         # 5. Kill old tmux session if it exists (lazy create guard)
         if _tmux_has_session(session):

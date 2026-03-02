@@ -97,22 +97,24 @@ def install_precommit_hook(project_path: Path) -> bool:
 
 
 def ensure_gitignore(project_path: Path) -> bool:
-    """Ensure .claude/ is in .gitignore. Returns True if modified."""
+    """Ensure .claude/ and .zulip-uploads/ are in .gitignore. Returns True if modified."""
     gitignore = project_path / ".gitignore"
-    entry = ".claude/"
+    entries = [".claude/", ".zulip-uploads/"]
 
     if gitignore.exists():
         content = gitignore.read_text()
-        if entry in content.splitlines():
+        lines = content.splitlines()
+        missing = [e for e in entries if e not in lines]
+        if not missing:
             return False
-        # Append with newline safety
         if content and not content.endswith("\n"):
             content += "\n"
-        content += entry + "\n"
+        for e in missing:
+            content += e + "\n"
         gitignore.write_text(content)
         return True
 
-    gitignore.write_text(entry + "\n")
+    gitignore.write_text("\n".join(entries) + "\n")
     return True
 
 

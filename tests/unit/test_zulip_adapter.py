@@ -11,6 +11,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch, mock_open
@@ -112,14 +113,14 @@ class TestCcmuxInit:
         assert precommit.read_text() == "#!/bin/bash\necho existing\n"
 
     def test_ac1_5_init_gitignore_already_has_entry(self, tmp_path: Path) -> None:
-        """AC-1.5: Init on project with .gitignore containing .claude/ does NOT modify."""
+        """AC-1.5: Init on project with .gitignore containing all entries does NOT modify."""
         mod = self._import_init()
         project = tmp_path / "myproject"
         project.mkdir()
-        (project / ".gitignore").write_text("node_modules/\n.claude/\n")
+        (project / ".gitignore").write_text("node_modules/\n.claude/\n.zulip-uploads/\n")
 
         mod.main([str(project)])
-        assert (project / ".gitignore").read_text() == "node_modules/\n.claude/\n"
+        assert (project / ".gitignore").read_text() == "node_modules/\n.claude/\n.zulip-uploads/\n"
 
     def test_ac1_6_idempotent(self, tmp_path: Path) -> None:
         """AC-1.6: Running init twice produces identical state."""
@@ -262,7 +263,7 @@ class TestZulipRelayHook:
         ]
         stdlib_modules = {
             "json", "os", "sys", "urllib.request", "urllib.parse",
-            "base64", "urllib", "__future__",
+            "base64", "urllib", "__future__", "re", "pathlib",
         }
         for line in import_lines:
             parts = line.replace("import ", "").replace("from ", "").split()
@@ -1333,6 +1334,22 @@ class TestReviewFixes:
         assert result["HTTP_PROXY"] == "http://127.0.0.1:8118"
         assert result["PLAIN_VALUE"] == "no_quotes"
 
+    def test_fix_env_template_expands_tilde(self, tmp_path: Path) -> None:
+        """Tilde paths in env_template.sh are expanded to absolute paths."""
+        from adapters.zulip_adapter.process_mgr import _parse_env_template
+
+        env_file = tmp_path / "env_template.sh"
+        env_file.write_text(
+            "export ZULIP_BOT_API_KEY_FILE=~/.ccmux/secrets/zulip_bot.env\n"
+            "export HTTP_PROXY=http://127.0.0.1:8118\n"
+        )
+        result = _parse_env_template(env_file)
+        # Tilde must be expanded — must not start with ~
+        assert not result["ZULIP_BOT_API_KEY_FILE"].startswith("~")
+        assert result["ZULIP_BOT_API_KEY_FILE"].endswith("/.ccmux/secrets/zulip_bot.env")
+        # Non-tilde values are unchanged
+        assert result["HTTP_PROXY"] == "http://127.0.0.1:8118"
+
     def test_fix11_old_injector_pid_cleared_on_recreate(self, tmp_path: Path) -> None:
         """Fix 11: Old injector's pid_file cleared before cancel to prevent race.
 
@@ -2063,3 +2080,735 @@ class TestClosedLoopScenarios:
         assert session_a != session_b
         assert session_a == "ccmux-dev--fix-auth"
         assert session_b == "ccmux-dev--add-tests"
+
+
+# ============================================================================
+# AC-9: File handler (adapters/zulip_adapter/file_handler.py)
+# ============================================================================
+
+
+class TestFileHandler:
+    """AC-9: file_handler.py pure functions."""
+
+    def _import(self):
+        from adapters.zulip_adapter import file_handler
+        return file_handler
+
+    # --- extract_attachments ---
+
+    def test_ac9_1_extract_single_attachment(self) -> None:
+        """AC-9.1: Single file attachment parsed correctly."""
+        fh = self._import()
+        content = "Here is the file [report.pdf](/user_uploads/1/ab/report.pdf)"
+        result = fh.extract_attachments(content)
+        assert result == [("report.pdf", "/user_uploads/1/ab/report.pdf")]
+
+    def test_ac9_2_extract_multiple_attachments(self) -> None:
+        """AC-9.2: Multiple attachments in one message."""
+        fh = self._import()
+        content = (
+            "Files: [a.txt](/user_uploads/1/a.txt) "
+            "and [b.png](/user_uploads/2/b.png)"
+        )
+        result = fh.extract_attachments(content)
+        assert len(result) == 2
+        assert result[0] == ("a.txt", "/user_uploads/1/a.txt")
+        assert result[1] == ("b.png", "/user_uploads/2/b.png")
+
+    def test_ac9_3_extract_no_attachments(self) -> None:
+        """AC-9.3: Plain text message has no attachments."""
+        fh = self._import()
+        result = fh.extract_attachments("Just a normal message")
+        assert result == []
+
+    def test_ac9_4_extract_inline_image(self) -> None:
+        """AC-9.4: Inline image ![name](/user_uploads/...) detected."""
+        fh = self._import()
+        content = "Look at this ![screenshot.png](/user_uploads/1/ss.png)"
+        result = fh.extract_attachments(content)
+        assert result == [("screenshot.png", "/user_uploads/1/ss.png")]
+
+    def test_ac9_4b_mixed_text_and_attachments(self) -> None:
+        """AC-9.4b: Message with text and attachment, text preserved."""
+        fh = self._import()
+        content = "Check this out [doc.pdf](/user_uploads/1/doc.pdf) thanks"
+        result = fh.extract_attachments(content)
+        assert len(result) == 1
+        stripped = fh.strip_attachment_links(content)
+        assert "doc.pdf" in stripped
+        assert "/user_uploads/" not in stripped
+
+    # --- safe_resolve ---
+
+    def test_ac9_5_safe_resolve_normal(self, tmp_path: Path) -> None:
+        """AC-9.5: Normal relative path resolves correctly."""
+        fh = self._import()
+        result = fh.safe_resolve(tmp_path, "subdir/file.txt")
+        assert result is not None
+        assert str(result).startswith(str(tmp_path.resolve()))
+
+    def test_ac9_6_safe_resolve_traversal(self, tmp_path: Path) -> None:
+        """AC-9.6: ../../../etc/passwd traversal blocked."""
+        fh = self._import()
+        result = fh.safe_resolve(tmp_path, "../../../etc/passwd")
+        assert result is None
+
+    def test_ac9_7_safe_resolve_absolute(self, tmp_path: Path) -> None:
+        """AC-9.7: Absolute path rejected."""
+        fh = self._import()
+        result = fh.safe_resolve(tmp_path, "/etc/passwd")
+        assert result is None
+
+    def test_ac9_8_safe_resolve_base_equals_path(self, tmp_path: Path) -> None:
+        """AC-9.8: Path that resolves to base itself is allowed."""
+        fh = self._import()
+        result = fh.safe_resolve(tmp_path, ".")
+        assert result is not None
+        assert result == tmp_path.resolve()
+
+    # --- sanitize_filename ---
+
+    def test_ac9_9_sanitize_separators(self) -> None:
+        """AC-9.9: Path separators stripped from filename."""
+        fh = self._import()
+        assert "/" not in fh.sanitize_filename("path/to/file.txt")
+        assert "\\" not in fh.sanitize_filename("path\\to\\file.txt")
+
+    def test_ac9_10_sanitize_special_chars(self) -> None:
+        """AC-9.10: Special characters removed."""
+        fh = self._import()
+        result = fh.sanitize_filename('file<>:"|?*.txt')
+        assert "<" not in result
+        assert ">" not in result
+        assert ":" not in result
+        assert '"' not in result
+        assert "|" not in result
+        assert "?" not in result
+        assert "*" not in result
+
+    def test_ac9_11_sanitize_leading_dots(self) -> None:
+        """AC-9.11: Leading dots removed to prevent hidden files."""
+        fh = self._import()
+        assert not fh.sanitize_filename("..hidden").startswith(".")
+        assert not fh.sanitize_filename(".bashrc").startswith(".")
+
+    def test_ac9_12_sanitize_empty(self) -> None:
+        """AC-9.12: Empty filename becomes 'unnamed'."""
+        fh = self._import()
+        assert fh.sanitize_filename("") == "unnamed"
+        assert fh.sanitize_filename("///") == "unnamed"
+        assert fh.sanitize_filename("...") == "unnamed"
+
+    # --- download_file ---
+
+    def test_ac9_13_download_success(self, tmp_path: Path) -> None:
+        """AC-9.13: Successful download writes file to dest."""
+        fh = self._import()
+        dest = tmp_path / "downloads" / "file.txt"
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"file content"
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        opener = MagicMock()
+        opener.open.return_value = mock_resp
+
+        ok = fh.download_file(
+            opener, "https://zulip.example.com", "Basic abc",
+            "/user_uploads/1/file.txt", dest
+        )
+        assert ok is True
+        assert dest.exists()
+        assert dest.read_bytes() == b"file content"
+
+    def test_ac9_14_download_http_error(self, tmp_path: Path) -> None:
+        """AC-9.14: HTTP error returns False, no crash."""
+        fh = self._import()
+        dest = tmp_path / "fail.txt"
+        opener = MagicMock()
+        opener.open.side_effect = urllib.request.URLError("404 Not Found")
+
+        ok = fh.download_file(
+            opener, "https://zulip.example.com", "Basic abc",
+            "/user_uploads/1/missing.txt", dest
+        )
+        assert ok is False
+        assert not dest.exists()
+
+    def test_ac9_15_download_creates_parent_dirs(self, tmp_path: Path) -> None:
+        """AC-9.15: Parent directories created automatically."""
+        fh = self._import()
+        dest = tmp_path / "a" / "b" / "c" / "file.txt"
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"data"
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        opener = MagicMock()
+        opener.open.return_value = mock_resp
+
+        ok = fh.download_file(
+            opener, "https://zulip.example.com", "Basic abc",
+            "/user_uploads/1/f.txt", dest
+        )
+        assert ok is True
+        assert dest.parent.exists()
+
+
+# ============================================================================
+# AC-9a: Inbound integration (adapter.py with file attachments)
+# ============================================================================
+
+
+class TestInboundFileHandling:
+    """AC-9a: Inbound file handling in adapter._handle_message()."""
+
+    def _make_adapter(self, tmp_path: Path):
+        """Create minimal adapter for testing _handle_message with files."""
+        from adapters.zulip_adapter.config import (
+            ZulipAdapterConfig, StreamConfig,
+        )
+        from adapters.zulip_adapter.adapter import ZulipAdapter
+
+        cred_file = tmp_path / "creds"
+        cred_file.write_text('ZULIP_BOT_API_KEY=testkey123')
+
+        cfg = ZulipAdapterConfig(
+            site="https://zulip.test",
+            bot_email="bot@test.com",
+            bot_credentials=cred_file,
+            streams_dir=tmp_path / "streams",
+            env_template=tmp_path / "env.sh",
+            runtime_dir=tmp_path / "runtime",
+        )
+        cfg.streams_dir.mkdir()
+        cfg.runtime_dir.mkdir()
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg.streams["dev"] = StreamConfig(
+            name="dev", project_path=project,
+        )
+
+        adapter = ZulipAdapter(cfg)
+        return adapter, project
+
+    def _make_event(self, stream, topic, content):
+        return {
+            "message": {
+                "type": "stream",
+                "display_recipient": stream,
+                "subject": topic,
+                "content": content,
+                "sender_full_name": "User",
+                "sender_email": "user@test.com",
+            }
+        }
+
+    def _run_handle(self, adapter, event, fifo, written, mock_opener_resp=None):
+        """Run _handle_message with mocks for ensure_instance, FIFO, scan_streams."""
+        import contextlib
+
+        cms = [
+            patch.object(adapter.process_mgr, "ensure_instance",
+                         return_value=(fifo, False)),
+            patch.object(adapter, "_write_to_fifo",
+                         side_effect=lambda p, m: (written.append(m), True)[-1]),
+            patch("adapters.zulip_adapter.adapter.scan_streams"),
+        ]
+        if mock_opener_resp is not None:
+            cms.append(
+                patch.object(adapter._opener, "open", return_value=mock_opener_resp)
+            )
+
+        with contextlib.ExitStack() as stack:
+            for cm in cms:
+                stack.enter_context(cm)
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(adapter._handle_message(event))
+            finally:
+                loop.close()
+
+    def _mock_download_resp(self, data: bytes = b"data"):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = data
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
+    def test_ac9a_1_single_attachment_downloaded(self, tmp_path: Path) -> None:
+        """AC-9a.1: Single attachment downloaded + FIFO notification."""
+        adapter, project = self._make_adapter(tmp_path)
+        content = "Here [report.pdf](/user_uploads/1/report.pdf)"
+
+        fifo = tmp_path / "runtime" / "dev" / "test" / "in.zulip"
+        fifo.parent.mkdir(parents=True)
+        os.mkfifo(str(fifo))
+
+        written = []
+        self._run_handle(
+            adapter, self._make_event("dev", "test", content),
+            fifo, written, self._mock_download_resp(b"pdf data"),
+        )
+
+        assert len(written) == 1
+        assert "[File: .zulip-uploads/" in written[0]
+        dl_path = project / ".zulip-uploads" / "test" / "report.pdf"
+        assert dl_path.exists()
+
+    def test_ac9a_2_text_plus_attachment(self, tmp_path: Path) -> None:
+        """AC-9a.2: Text + attachment both appear in FIFO."""
+        adapter, project = self._make_adapter(tmp_path)
+        content = "Check this [doc.pdf](/user_uploads/1/doc.pdf) please"
+
+        fifo = tmp_path / "runtime" / "dev" / "test" / "in.zulip"
+        fifo.parent.mkdir(parents=True)
+        os.mkfifo(str(fifo))
+
+        written = []
+        self._run_handle(
+            adapter, self._make_event("dev", "test", content),
+            fifo, written, self._mock_download_resp(),
+        )
+
+        msg = written[0]
+        assert "[File:" in msg
+        assert "Check this" in msg
+        assert "/user_uploads/" not in msg
+
+    def test_ac9a_3_attachment_only(self, tmp_path: Path) -> None:
+        """AC-9a.3: Attachment-only message → file notification only."""
+        adapter, project = self._make_adapter(tmp_path)
+        content = "[data.csv](/user_uploads/1/data.csv)"
+
+        fifo = tmp_path / "runtime" / "dev" / "test" / "in.zulip"
+        fifo.parent.mkdir(parents=True)
+        os.mkfifo(str(fifo))
+
+        written = []
+        self._run_handle(
+            adapter, self._make_event("dev", "test", content),
+            fifo, written, self._mock_download_resp(b"csv"),
+        )
+
+        msg = written[0]
+        assert "[File:" in msg
+
+    def test_ac9a_4_download_fails_text_still_sent(self, tmp_path: Path) -> None:
+        """AC-9a.4: Download fails → text still sent."""
+        adapter, project = self._make_adapter(tmp_path)
+        content = "Here [f.txt](/user_uploads/1/f.txt) text"
+
+        fifo = tmp_path / "runtime" / "dev" / "test" / "in.zulip"
+        fifo.parent.mkdir(parents=True)
+        os.mkfifo(str(fifo))
+
+        written = []
+        with patch.object(adapter.process_mgr, "ensure_instance",
+                          return_value=(fifo, False)), \
+             patch.object(adapter, "_write_to_fifo",
+                          side_effect=lambda p, m: (written.append(m), True)[-1]), \
+             patch("adapters.zulip_adapter.adapter.scan_streams"), \
+             patch.object(adapter._opener, "open",
+                          side_effect=urllib.request.URLError("fail")):
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(
+                    adapter._handle_message(self._make_event("dev", "test", content))
+                )
+            finally:
+                loop.close()
+
+        assert len(written) == 1
+        assert "text" in written[0]
+
+    def test_ac9a_5_traversal_filename_sanitized(self, tmp_path: Path) -> None:
+        """AC-9a.5: Path traversal filename is sanitized."""
+        from adapters.zulip_adapter.file_handler import sanitize_filename
+        result = sanitize_filename("../../etc/passwd")
+        assert "/" not in result
+        assert ".." not in result
+
+    def test_ac9a_6_multiple_attachments(self, tmp_path: Path) -> None:
+        """AC-9a.6: Multiple attachments all handled."""
+        adapter, project = self._make_adapter(tmp_path)
+        content = "[a.txt](/user_uploads/1/a.txt) [b.txt](/user_uploads/2/b.txt)"
+
+        fifo = tmp_path / "runtime" / "dev" / "test" / "in.zulip"
+        fifo.parent.mkdir(parents=True)
+        os.mkfifo(str(fifo))
+
+        written = []
+        self._run_handle(
+            adapter, self._make_event("dev", "test", content),
+            fifo, written, self._mock_download_resp(),
+        )
+
+        msg = written[0]
+        assert msg.count("[File:") == 2
+
+
+# ============================================================================
+# AC-9b: Outbound integration (zulip_relay_hook.py with send-file)
+# ============================================================================
+
+
+class TestOutboundFileUpload:
+    """AC-9b: Outbound file upload in zulip_relay_hook.py."""
+
+    def _import_hook(self):
+        import importlib
+        from scripts import zulip_relay_hook
+        return importlib.reload(zulip_relay_hook)
+
+    def test_ac9b_1_send_file_uploaded(self, tmp_path: Path) -> None:
+        """AC-9b.1: [send-file:] marker → file uploaded, marker replaced."""
+        hook = self._import_hook()
+        project = tmp_path / "project"
+        project.mkdir()
+        test_file = project / "output.txt"
+        test_file.write_text("hello")
+
+        with patch.dict(os.environ, {"ZULIP_PROJECT_PATH": str(project)}):
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps({
+                "result": "success", "uri": "/user_uploads/1/output.txt"
+            }).encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+
+            with patch("urllib.request.urlopen", return_value=mock_resp):
+                result = hook._process_send_file_markers(
+                    "Here is the file [send-file: output.txt]",
+                    "https://zulip.test", "Basic abc"
+                )
+
+            assert "[output.txt](/user_uploads/1/output.txt)" in result
+            assert "[send-file:" not in result
+
+    def test_ac9b_2_no_markers_unchanged(self) -> None:
+        """AC-9b.2: No markers → content unchanged (backwards compatible)."""
+        hook = self._import_hook()
+        assert not hook.SEND_FILE_RE.search("Just a normal message")
+
+    def test_ac9b_3_path_outside_project_rejected(self, tmp_path: Path) -> None:
+        """AC-9b.3: Path outside project → rejected."""
+        hook = self._import_hook()
+        project = tmp_path / "project"
+        project.mkdir()
+
+        with patch.dict(os.environ, {"ZULIP_PROJECT_PATH": str(project)}):
+            result = hook._process_send_file_markers(
+                "[send-file: ../../etc/shadow]",
+                "https://zulip.test", "Basic abc"
+            )
+        assert result == ""
+
+    def test_ac9b_4_file_not_found_skipped(self, tmp_path: Path) -> None:
+        """AC-9b.4: File not found → marker removed."""
+        hook = self._import_hook()
+        project = tmp_path / "project"
+        project.mkdir()
+
+        with patch.dict(os.environ, {"ZULIP_PROJECT_PATH": str(project)}):
+            result = hook._process_send_file_markers(
+                "[send-file: nonexistent.txt]",
+                "https://zulip.test", "Basic abc"
+            )
+        assert result == ""
+
+    def test_ac9b_5_multiple_markers(self, tmp_path: Path) -> None:
+        """AC-9b.5: Multiple markers all processed."""
+        hook = self._import_hook()
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "a.txt").write_text("a")
+        (project / "b.txt").write_text("b")
+
+        with patch.dict(os.environ, {"ZULIP_PROJECT_PATH": str(project)}):
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps({
+                "result": "success", "uri": "/user_uploads/1/file"
+            }).encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+
+            with patch("urllib.request.urlopen", return_value=mock_resp):
+                result = hook._process_send_file_markers(
+                    "[send-file: a.txt] and [send-file: b.txt]",
+                    "https://zulip.test", "Basic abc"
+                )
+
+        assert "[send-file:" not in result
+        assert "/user_uploads/" in result
+
+    def test_ac9b_6_project_path_unset(self) -> None:
+        """AC-9b.6: ZULIP_PROJECT_PATH unset → markers stripped."""
+        hook = self._import_hook()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ZULIP_PROJECT_PATH", None)
+            result = hook._process_send_file_markers(
+                "test [send-file: f.txt] end",
+                "https://zulip.test", "Basic abc"
+            )
+        assert "[send-file:" not in result
+
+    def test_ac9b_7_upload_api_error(self, tmp_path: Path) -> None:
+        """AC-9b.7: Upload API error → marker removed, no crash."""
+        hook = self._import_hook()
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "f.txt").write_text("data")
+
+        with patch.dict(os.environ, {"ZULIP_PROJECT_PATH": str(project)}):
+            with patch("urllib.request.urlopen",
+                       side_effect=urllib.request.URLError("fail")):
+                result = hook._process_send_file_markers(
+                    "text [send-file: f.txt] end",
+                    "https://zulip.test", "Basic abc"
+                )
+
+        assert "[send-file:" not in result
+
+    def test_ac9b_8_stdlib_only(self) -> None:
+        """AC-9b.8: Relay hook uses only stdlib imports."""
+        hook_path = Path(__file__).resolve().parent.parent.parent / "scripts" / "zulip_relay_hook.py"
+        source = hook_path.read_text()
+        # Should not import requests, aiohttp, or other third-party libs
+        assert "import requests" not in source
+        assert "import aiohttp" not in source
+        assert "import httpx" not in source
+
+
+# ============================================================================
+# AC-9c: Security tests
+# ============================================================================
+
+
+class TestFileHandlerSecurity:
+    """AC-9c: Security boundary tests for file handling."""
+
+    def _import(self):
+        from adapters.zulip_adapter import file_handler
+        return file_handler
+
+    def test_ac9c_1_inbound_traversal_rejected(self, tmp_path: Path) -> None:
+        """AC-9c.1: Inbound ../../etc/passwd filename → rejected."""
+        fh = self._import()
+        result = fh.safe_resolve(tmp_path, "../../etc/passwd")
+        assert result is None
+
+    def test_ac9c_2_outbound_absolute_rejected(self, tmp_path: Path) -> None:
+        """AC-9c.2: Outbound absolute path /etc/passwd → rejected."""
+        fh = self._import()
+        result = fh.safe_resolve(tmp_path, "/etc/passwd")
+        assert result is None
+
+    def test_ac9c_3_outbound_relative_traversal(self, tmp_path: Path) -> None:
+        """AC-9c.3: Outbound relative traversal ../../../etc/shadow → rejected."""
+        fh = self._import()
+        result = fh.safe_resolve(tmp_path, "../../../etc/shadow")
+        assert result is None
+
+    def test_ac9c_4_null_bytes_sanitized(self) -> None:
+        """AC-9c.4: Null bytes in filename → sanitized."""
+        fh = self._import()
+        result = fh.sanitize_filename("file\x00.txt")
+        assert "\x00" not in result
+        assert result == "file.txt"
+
+    def test_ac9c_5_symlink_outside_project(self, tmp_path: Path) -> None:
+        """AC-9c.5: Symlink pointing outside project → rejected by resolve."""
+        fh = self._import()
+        project = tmp_path / "project"
+        project.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        external_file = outside / "external.txt"
+        external_file.write_text("data")
+
+        # Create symlink inside project pointing outside
+        link = project / "link.txt"
+        link.symlink_to(external_file)
+
+        result = fh.safe_resolve(project, "link.txt")
+        # resolve() follows symlink → outside project → rejected
+        assert result is None
+
+
+# ============================================================================
+# AC-9d: Config/Init tests
+# ============================================================================
+
+
+class TestFileHandlerConfig:
+    """AC-9d: Configuration and initialization for file handling."""
+
+    def test_ac9d_1_project_path_in_tmux_env(self, tmp_path: Path) -> None:
+        """AC-9d.1: ZULIP_PROJECT_PATH set in tmux env during lazy create."""
+        from adapters.zulip_adapter.config import StreamConfig
+        from adapters.zulip_adapter.process_mgr import ProcessManager, _parse_env_template
+
+        # Read actual source to verify env var is set
+        import inspect
+        from adapters.zulip_adapter import process_mgr
+        source = inspect.getsource(process_mgr.ProcessManager._lazy_create)
+        assert 'ZULIP_PROJECT_PATH' in source
+
+    def test_ac9d_2_gitignore_zulip_uploads(self, tmp_path: Path) -> None:
+        """AC-9d.2: .zulip-uploads/ added to .gitignore by ccmux-init."""
+        from scripts import ccmux_init
+        import importlib
+        mod = importlib.reload(ccmux_init)
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        mod.ensure_gitignore(project)
+        content = (project / ".gitignore").read_text()
+        assert ".zulip-uploads/" in content.splitlines()
+
+    def test_ac9d_3_gitignore_idempotent(self, tmp_path: Path) -> None:
+        """AC-9d.3: Running ensure_gitignore twice is idempotent."""
+        from scripts import ccmux_init
+        import importlib
+        mod = importlib.reload(ccmux_init)
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        assert mod.ensure_gitignore(project) is True  # First: modified
+        assert mod.ensure_gitignore(project) is False  # Second: no change
+
+        content = (project / ".gitignore").read_text()
+        lines = content.splitlines()
+        assert lines.count(".zulip-uploads/") == 1
+        assert lines.count(".claude/") == 1
+
+
+# ============================================================================
+# AC-9e: Closed-loop scenario tests
+# ============================================================================
+
+
+class TestFileHandlerClosedLoop:
+    """AC-9e: End-to-end closed-loop tests."""
+
+    def test_ac9e_1_inbound_end_to_end(self, tmp_path: Path) -> None:
+        """AC-9e.1: Mock event → download → file on disk + notification in FIFO."""
+        from adapters.zulip_adapter.config import (
+            ZulipAdapterConfig, StreamConfig,
+        )
+        from adapters.zulip_adapter.adapter import ZulipAdapter
+
+        cred_file = tmp_path / "creds"
+        cred_file.write_text('ZULIP_BOT_API_KEY=testkey')
+
+        cfg = ZulipAdapterConfig(
+            site="https://zulip.test",
+            bot_email="bot@test.com",
+            bot_credentials=cred_file,
+            streams_dir=tmp_path / "streams",
+            env_template=tmp_path / "env.sh",
+            runtime_dir=tmp_path / "runtime",
+        )
+        cfg.streams_dir.mkdir()
+        cfg.runtime_dir.mkdir()
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg.streams["dev"] = StreamConfig(name="dev", project_path=project)
+
+        adapter = ZulipAdapter(cfg)
+
+        fifo = tmp_path / "runtime" / "dev" / "mytopic" / "in.zulip"
+        fifo.parent.mkdir(parents=True)
+        os.mkfifo(str(fifo))
+
+        written = []
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"PDF_CONTENT_HERE"
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        event = {
+            "message": {
+                "type": "stream",
+                "display_recipient": "dev",
+                "subject": "mytopic",
+                "content": "Review this [spec.pdf](/user_uploads/42/ab/spec.pdf)",
+                "sender_full_name": "Alice",
+                "sender_email": "alice@test.com",
+            }
+        }
+
+        with patch.object(adapter.process_mgr, "ensure_instance",
+                          return_value=(fifo, False)), \
+             patch.object(adapter, "_write_to_fifo",
+                          side_effect=lambda p, m: (written.append(m), True)[-1]), \
+             patch.object(adapter._opener, "open", return_value=mock_resp), \
+             patch("adapters.zulip_adapter.adapter.scan_streams"):
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(adapter._handle_message(event))
+            finally:
+                loop.close()
+
+        # File on disk
+        dl_path = project / ".zulip-uploads" / "mytopic" / "spec.pdf"
+        assert dl_path.exists()
+        assert dl_path.read_bytes() == b"PDF_CONTENT_HERE"
+
+        # FIFO notification
+        assert len(written) == 1
+        assert "[File: .zulip-uploads/mytopic/spec.pdf]" in written[0]
+        assert "Review this" in written[0]
+
+    def test_ac9e_2_outbound_end_to_end(self, tmp_path: Path) -> None:
+        """AC-9e.2: Hook with send-file → mock upload → correct message."""
+        hook_path = Path(__file__).resolve().parent.parent.parent / "scripts" / "zulip_relay_hook.py"
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("hook", hook_path)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "result.csv").write_text("a,b,c")
+
+        upload_resp = MagicMock()
+        upload_resp.read.return_value = json.dumps({
+            "result": "success", "uri": "/user_uploads/99/result.csv"
+        }).encode()
+        upload_resp.__enter__ = lambda s: s
+        upload_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch.dict(os.environ, {"ZULIP_PROJECT_PATH": str(project)}):
+            with patch("urllib.request.urlopen", return_value=upload_resp):
+                result = hook._process_send_file_markers(
+                    "Here are the results: [send-file: result.csv]",
+                    "https://zulip.test", "Basic abc"
+                )
+
+        assert "[result.csv](/user_uploads/99/result.csv)" in result
+        assert "Here are the results:" in result
+
+    def test_ac9e_3_round_trip(self, tmp_path: Path) -> None:
+        """AC-9e.3: Download inbound, reference outbound → both paths validate."""
+        from adapters.zulip_adapter.file_handler import safe_resolve
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        # Inbound: validate download destination
+        inbound_dest = safe_resolve(project, ".zulip-uploads/topic/report.pdf")
+        assert inbound_dest is not None
+        assert str(inbound_dest).startswith(str(project.resolve()))
+
+        # Outbound: validate send-file reference
+        outbound_src = safe_resolve(project, ".zulip-uploads/topic/report.pdf")
+        assert outbound_src is not None
+        assert str(outbound_src).startswith(str(project.resolve()))
+
+        # Both resolve to the same path
+        assert inbound_dest == outbound_src

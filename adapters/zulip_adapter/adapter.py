@@ -21,6 +21,13 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import ZulipAdapterConfig, scan_streams
+from .file_handler import (
+    download_file,
+    extract_attachments,
+    safe_resolve,
+    sanitize_filename,
+    strip_attachment_links,
+)
 from .process_mgr import ProcessManager
 
 log = logging.getLogger(__name__)
@@ -224,12 +231,48 @@ class ZulipAdapter:
             # Notify in Zulip that a new session started
             self._post_message(stream, topic, "\U0001f916 Session started.")
 
+        # Handle file attachments: download to project dir, build notifications
+        file_notifications: list[str] = []
+        attachments = extract_attachments(content)
+        if attachments:
+            project_path = stream_cfg.project_path
+            topic_dir_name = content_topic = topic.replace("/", "_").replace("\\", "_")
+            for display_name, server_path in attachments:
+                filename = sanitize_filename(display_name)
+                rel_path = f".zulip-uploads/{topic_dir_name}/{filename}"
+                dest = safe_resolve(project_path, rel_path)
+                if dest is None:
+                    log.warning(
+                        "Path validation failed for attachment: %s", rel_path
+                    )
+                    continue
+                ok = download_file(
+                    self._opener,
+                    self.cfg.site,
+                    self._auth_header,
+                    server_path,
+                    dest,
+                )
+                if ok:
+                    file_notifications.append(f"[File: {rel_path}]")
+                else:
+                    log.warning("Failed to download attachment: %s", server_path)
+
+            # Strip raw /user_uploads/ links from the text
+            content = strip_attachment_links(content)
+
         # Prefix with timestamp and channel so Claude Code knows when
         # and where the message came from. Each topic is an isolated
         # single-user instance, so sender name is omitted.
         # Format: [yy/mm/dd hh:mm From zulip]
         now = datetime.now().strftime("%y/%m/%d %H:%M")
-        formatted = f"[{now} From zulip] {content}"
+        parts: list[str] = []
+        if file_notifications:
+            parts.extend(file_notifications)
+        if content:
+            parts.append(content)
+        body = "\n".join(parts) if parts else content
+        formatted = f"[{now} From zulip] {body}"
 
         # Write to FIFO in executor to avoid blocking the event loop
         # (prevents deadlock if pipe buffer fills during message burst)
