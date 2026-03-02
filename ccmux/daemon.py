@@ -370,13 +370,31 @@ class Daemon:
         log.info("injecting messages", message_count=len(messages))
         try:
             await async_inject_messages(self._pane, messages)
+            self._inject_failures = 0
         except InjectionTimeout:
             log.error("injection timed out: tmux send-keys hung, re-queuing")
             self._message_queue[:0] = messages
             self._schedule_retry()
         except Exception as e:
-            log.error("injection failed", error=str(e))
-            self._message_queue[:0] = messages
+            self._inject_failures = getattr(self, "_inject_failures", 0) + 1
+            if self._inject_failures >= 3:
+                log.error(
+                    "injection failed, dropping messages to unblock queue",
+                    attempts=self._inject_failures,
+                    dropped=len(messages),
+                    error=str(e),
+                )
+                self._inject_failures = 0
+                # Messages are already cleared from queue — do not re-queue
+            else:
+                log.error(
+                    "injection failed",
+                    attempt=self._inject_failures,
+                    max_attempts=3,
+                    error=str(e),
+                )
+                self._message_queue[:0] = messages
+                self._schedule_retry()
 
     def _schedule_retry(self) -> None:
         """Schedule a deferred injection retry when suppressed by terminal activity."""

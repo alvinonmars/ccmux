@@ -90,12 +90,60 @@ def inject(pane: libtmux.Pane, text: str) -> None:
         ) from exc
 
 
+def format_single_message(msg: Message) -> str:
+    """Format a single message into the injection string."""
+    t = time.strftime("%H:%M", time.localtime(msg.ts))
+    return f"[{t} {msg.channel}] {msg.content}"
+
+
+# Maximum bytes for a single tmux send-keys -l payload.
+# tmux rejects commands exceeding its internal buffer (~262144 bytes on most
+# builds).  We stay well below that to leave room for the tmux protocol
+# overhead and the pane_id / flags in the argv.
+MAX_SENDKEYS_BYTES = 200_000
+
+
 def inject_messages(pane: libtmux.Pane, messages: list[Message]) -> None:
-    """Format and inject a list of queued messages (synchronous)."""
+    """Format and inject queued messages, one at a time if needed.
+
+    Strategy:
+    1. Try to batch all messages into a single send-keys call (ideal — one
+       prompt turn for Claude).
+    2. If the batch exceeds MAX_SENDKEYS_BYTES, fall back to injecting each
+       message individually.
+    3. If a single message still exceeds the limit, truncate it with a
+       warning suffix so the message is not silently dropped.
+    """
     if not messages:
         return
+
+    # Fast path: try batch injection
     text = format_messages(messages)
-    inject(pane, text)
+    if len(text.encode("utf-8")) <= MAX_SENDKEYS_BYTES:
+        inject(pane, text)
+        return
+
+    # Slow path: inject one message at a time
+    log.warning(
+        "batch too large (%d bytes, %d msgs), injecting individually",
+        len(text.encode("utf-8")),
+        len(messages),
+    )
+    for msg in messages:
+        single = format_single_message(msg)
+        encoded = single.encode("utf-8")
+        if len(encoded) > MAX_SENDKEYS_BYTES:
+            # Truncate oversized single message
+            truncated = encoded[: MAX_SENDKEYS_BYTES - 100].decode(
+                "utf-8", errors="ignore"
+            )
+            single = truncated + "\n[... truncated, message too long]"
+            log.warning(
+                "single message truncated: channel=%s original=%d bytes",
+                msg.channel,
+                len(encoded),
+            )
+        inject(pane, single)
 
 
 async def async_inject_messages(
