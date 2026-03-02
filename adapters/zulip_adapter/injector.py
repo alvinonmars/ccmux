@@ -21,8 +21,8 @@ IDLE_THRESHOLD = 5.0  # seconds of terminal idle before injecting
 POLL_INTERVAL = 1.0  # seconds between ready-state checks
 SEND_KEYS_TIMEOUT = 10  # seconds
 
-# Claude Code prompt pattern (❯ character)
-CLAUDE_PROMPT_RE = re.compile(r"❯\s*$", re.MULTILINE)
+# Claude Code prompt pattern (❯ character, possibly followed by hint text)
+CLAUDE_PROMPT_RE = re.compile(r"❯", re.MULTILINE)
 # Shell prompt patterns (Claude has exited)
 SHELL_PROMPT_RE = re.compile(r"[\$#]\s*$", re.MULTILINE)
 

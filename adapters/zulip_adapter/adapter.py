@@ -56,6 +56,8 @@ class ZulipAdapter:
         self.process_mgr = ProcessManager(cfg)
         self._running = True
         self._auth_header = self._build_auth()
+        # Bypass system proxy — Zulip server is local, no proxy needed.
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def _build_auth(self) -> str:
         cred = base64.b64encode(
@@ -83,7 +85,7 @@ class ZulipAdapter:
         req.add_header("Content-Type", "application/x-www-form-urlencoded")
 
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with self._opener.open(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
             body = e.read().decode()

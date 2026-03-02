@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -40,9 +41,15 @@ def _sanitize_name(name: str) -> str:
 
     Zulip topics can contain ':', '.', spaces, '()', '#', etc.
     tmux interprets ':' as window separator and '.' as pane separator.
-    Replace unsafe chars with underscore.
+    Replace unsafe chars with underscore, and append a hash suffix when
+    characters were replaced to preserve uniqueness (e.g. Chinese topic names
+    that would otherwise all collapse to underscores).
     """
-    return _UNSAFE_CHARS_RE.sub("_", name)
+    safe = _UNSAFE_CHARS_RE.sub("_", name)
+    if safe != name:
+        suffix = hashlib.sha256(name.encode()).hexdigest()[:8]
+        safe = f"{safe}_{suffix}"
+    return safe
 
 
 def _tmux_session_name(stream: str, topic: str) -> str:
@@ -298,14 +305,16 @@ class ProcessManager:
             log.warning("Killing existing tmux session: %s", session)
             _tmux_kill_session(session)
 
-        # 6. Create tmux session with env vars and Claude Code
+        # 6. Create tmux session with a shell, then send-keys to start Claude.
+        # Running claude as the tmux session command causes it to exit
+        # immediately (no interactive TTY from shell). Using send-keys
+        # gives claude a proper interactive shell environment.
         tmux_cmd = [
             "tmux", "new-session", "-d", "-s", session,
             "-c", str(project_path),
         ]
         for k, v in env_vars.items():
             tmux_cmd.extend(["-e", f"{k}={v}"])
-        tmux_cmd.append("claude --dangerously-skip-permissions")
 
         try:
             result = subprocess.run(tmux_cmd, capture_output=True, timeout=10)
@@ -321,6 +330,17 @@ class ProcessManager:
             log.error("tmux new-session timed out for %s", session)
             self._close_sentinel(key)
             return None
+
+        # 6b. Send claude command via send-keys
+        try:
+            subprocess.run(
+                ["tmux", "send-keys", "-t", session,
+                 "claude --dangerously-skip-permissions", "Enter"],
+                capture_output=True,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning("tmux send-keys timed out for %s", session)
 
         # 7. Get pane PID and write to PID file
         try:

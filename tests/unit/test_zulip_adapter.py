@@ -1115,17 +1115,22 @@ class TestReviewFixes:
 
         # Colons (tmux window separator)
         assert ":" not in _tmux_session_name("dev", "fix: auth bug")
-        # Dots (tmux pane separator)
-        assert _sanitize_name("v2.0") == "v2_0"
+        # Dots (tmux pane separator) — hash suffix appended since chars were replaced
+        result = _sanitize_name("v2.0")
+        assert "." not in result
+        assert result.startswith("v2_0_")
         # Spaces
         assert " " not in _tmux_session_name("dev", "fix auth bug")
         # Parentheses
         assert "(" not in _sanitize_name("test (draft)")
         # Hash
         assert "#" not in _sanitize_name("issue #42")
-        # Normal names unchanged
+        # Normal names unchanged (no unsafe chars → no hash suffix)
         assert _sanitize_name("fix-auth-bug") == "fix-auth-bug"
         assert _sanitize_name("ccmux-dev") == "ccmux-dev"
+        # Non-ASCII names get unique hashes to avoid collisions
+        assert _sanitize_name("测试") != _sanitize_name("你好")
+        assert _sanitize_name("测试") != _sanitize_name("会议")
 
     def test_fix2_runtime_dir_sanitized(self, tmp_path: Path) -> None:
         """Fix 2: Runtime directory paths are sanitized."""
