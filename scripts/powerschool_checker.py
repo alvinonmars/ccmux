@@ -33,7 +33,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from ccmux.paths import HOMEWORK_DIR, POWERSCHOOL_ENV
+from ccmux.paths import HOMEWORK_DIR, POWERSCHOOL_ENV, RUNTIME_DIR
 
 ENV_FILE = POWERSCHOOL_ENV
 CHILD_NAME = os.environ.get("PS_CHILD_NAME", "Child")
@@ -41,7 +41,7 @@ SCHOOL_CODE = os.environ.get("PS_SCHOOL_CODE", "school")
 CHILD_DIR = os.environ.get("PS_CHILD_DIR", "child")
 BASE_OUTPUT_DIR = HOMEWORK_DIR / SCHOOL_CODE / CHILD_DIR
 STATE_FILE = BASE_OUTPUT_DIR / ".seen_assignments.json"
-FIFO_PATH = Path("/tmp/ccmux/in.homework")
+FIFO_PATH = RUNTIME_DIR / "in.homework"
 TODAY = date.today()
 TODAY_ISO = TODAY.isoformat()
 MONTH_DIR = BASE_OUTPUT_DIR / TODAY.strftime("%Y-%m")

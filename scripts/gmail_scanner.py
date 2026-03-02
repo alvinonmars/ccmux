@@ -34,10 +34,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from ccmux.paths import GMAIL_ENV, GMAIL_SCAN_DIR
+from ccmux.paths import GMAIL_ENV, GMAIL_SCAN_DIR, RUNTIME_DIR
 
 SCAN_STATE_PATH = GMAIL_SCAN_DIR / "last_scan.json"
-FIFO_PATH = Path("/tmp/ccmux/in.gmail")
+FIFO_PATH = RUNTIME_DIR / "in.gmail"
 
 IMAP_HOST = "imap.gmail.com"
 IMAP_PORT = 993

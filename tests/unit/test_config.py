@@ -11,7 +11,9 @@ from ccmux.config import Config, load
 def test_load_defaults(tmp_path):
     """load() with no ccmux.toml returns all defaults."""
     cfg = load(tmp_path)
-    assert cfg.runtime_dir == Path("/tmp/ccmux")
+    import os
+    xdg = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    assert cfg.runtime_dir == Path(xdg) / "ccmux"
     assert cfg.idle_threshold == 30
     assert cfg.silence_timeout == 3
     assert cfg.backoff_initial == 1

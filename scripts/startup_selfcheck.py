@@ -34,9 +34,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from ccmux.paths import BUTLER_DIR
+from ccmux.paths import BUTLER_DIR, RUNTIME_DIR
 
-FIFO_PATH = Path("/tmp/ccmux/in.butler")
+FIFO_PATH = RUNTIME_DIR / "in.butler"
 STATE_DIR = BUTLER_DIR
 LAST_SCAN_FILE = STATE_DIR / "last_scan.json"
 NOW = datetime.now()

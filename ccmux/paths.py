@@ -29,6 +29,12 @@ SECRETS_ROOT = Path(
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# Runtime directory (FIFOs, sockets, PID files — ephemeral, recreated on start)
+_xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+RUNTIME_DIR = Path(
+    os.environ.get("CCMUX_RUNTIME_DIR", str(Path(_xdg_runtime) / "ccmux"))
+)
+
 # --- Data sub-paths ----------------------------------------------------------
 
 HOUSEHOLD_DIR = DATA_ROOT / "household"

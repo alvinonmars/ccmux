@@ -40,7 +40,8 @@ class ZulipAdapterConfig:
     bot_credentials: Path
     streams_dir: Path
     env_template: Path
-    runtime_dir: Path = Path("/tmp/ccmux")
+    runtime_dir: Path = field(default_factory=lambda: Path(
+        os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ccmux")
     streams: dict[str, StreamConfig] = field(default_factory=dict)
     _streams_mtime: float = 0.0
 
@@ -78,7 +79,9 @@ def load(project_root: Path | None = None) -> ZulipAdapterConfig:
     )
 
     runtime = data.get("runtime", {})
-    runtime_dir = Path(runtime.get("dir", "/tmp/ccmux"))
+    runtime_dir = Path(runtime.get("dir", os.path.join(
+        os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "ccmux"
+    )))
 
     cfg = ZulipAdapterConfig(
         site=site,

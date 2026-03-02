@@ -22,12 +22,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from ccmux.paths import HEALTH_DIR
+from ccmux.paths import HEALTH_DIR, RUNTIME_DIR
 
 CHILD_NAME = os.environ.get("HEALTH_CHILD_NAME", "Child")
 CHILD_DIR = os.environ.get("HEALTH_CHILD_DIR", "child")
 POO_LOG = HEALTH_DIR / CHILD_DIR / "poo_log.jsonl"
-FIFO_PATH = Path("/tmp/ccmux/in.health")
+FIFO_PATH = RUNTIME_DIR / "in.health"
 TODAY = date.today()
 TODAY_ISO = TODAY.isoformat()
 ALERT_THRESHOLD_DAYS = 3
