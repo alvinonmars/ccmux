@@ -1106,12 +1106,14 @@ class TestReviewFixes:
 
         injector = Injector(str(fifo_path), "nonexistent-session", pid_file=str(pid_file))
 
-        # Run the injector — it should detect tmux session gone and exit
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(injector.run())
-        finally:
-            loop.close()
+        # Mock _tmux_has_session to return False immediately (avoids hang if
+        # tmux is running with a matching session name)
+        with patch("adapters.zulip_adapter.injector._tmux_has_session", return_value=False):
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(injector.run())
+            finally:
+                loop.close()
 
         # PID file should be cleaned up
         assert not pid_file.exists()
@@ -1258,8 +1260,10 @@ class TestReviewFixes:
 
     def test_fix9_instance_dir_sanitized(self, tmp_path: Path) -> None:
         """Fix 9: instance_dir path uses sanitized names to prevent traversal."""
-        from adapters.zulip_adapter.process_mgr import ProcessManager, _sanitize_name
-        from adapters.zulip_adapter.config import ZulipAdapterConfig, StreamConfig
+        from adapters.zulip_adapter.process_mgr import (
+            ProcessManager, _sanitize_name, _runtime_dir, _fifo_path,
+        )
+        from adapters.zulip_adapter.config import ZulipAdapterConfig
 
         streams_dir = tmp_path / "streams"
         streams_dir.mkdir()
@@ -1278,7 +1282,6 @@ class TestReviewFixes:
             env_template=env_tpl,
             runtime_dir=runtime,
         )
-        mgr = ProcessManager(cfg)
 
         # Malicious topic with path traversal chars
         malicious_topic = "../../etc/passwd"
@@ -1288,10 +1291,14 @@ class TestReviewFixes:
         assert ".." not in sanitized
         assert "/" not in sanitized
 
-        # The instance_dir should be under streams_dir, not escaped
-        expected_path = streams_dir / _sanitize_name("test-stream") / sanitized
-        # Verify it stays under streams_dir
-        assert str(expected_path).startswith(str(streams_dir))
+        # Verify actual production functions produce safe paths
+        rt = _runtime_dir(cfg, "test-stream", malicious_topic)
+        assert str(rt).startswith(str(runtime))
+        assert ".." not in str(rt)
+
+        fifo = _fifo_path(cfg, "test-stream", malicious_topic)
+        assert str(fifo).startswith(str(runtime))
+        assert ".." not in str(fifo)
 
 
 # ============================================================================

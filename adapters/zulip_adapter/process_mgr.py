@@ -187,6 +187,17 @@ class ProcessManager:
         if self.is_alive(stream, topic) and fifo.exists() and not injector_dead:
             return fifo
 
+        # Fallback: injector task running + tmux alive = instance is OK
+        # (covers case where PID file write failed in _lazy_create step 7)
+        if (
+            not injector_dead
+            and key in self._injector_tasks
+            and fifo.exists()
+            and _tmux_has_session(_tmux_session_name(stream, topic))
+        ):
+            log.debug("PID file missing but injector+tmux alive for %s", key)
+            return fifo
+
         if injector_dead:
             log.warning("Injector task died for %s, recreating instance", key)
 

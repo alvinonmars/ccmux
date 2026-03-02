@@ -221,8 +221,13 @@ class ZulipAdapter:
         now = datetime.now().strftime("%H:%M")
         formatted = f"[{now} zulip] {content}"
 
-        # Write to FIFO
-        if not self._write_to_fifo(fifo, formatted):
+        # Write to FIFO in executor to avoid blocking the event loop
+        # (prevents deadlock if pipe buffer fills during message burst)
+        loop = asyncio.get_event_loop()
+        success = await loop.run_in_executor(
+            None, self._write_to_fifo, fifo, formatted
+        )
+        if not success:
             log.error(
                 "Failed to write to FIFO for %s/%s, will retry on next message",
                 stream, topic,
