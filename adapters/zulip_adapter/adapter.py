@@ -282,11 +282,16 @@ class ZulipAdapter:
         self._api_call("DELETE", "/events", data={"queue_id": queue_id}, timeout=5)
 
     def stop(self) -> None:
-        """Signal the adapter to stop. Deletes event queue to unblock long-poll."""
+        """Signal the adapter to stop. Deletes event queue to unblock long-poll.
+
+        Idempotent — safe to call multiple times (signal handler + finally block).
+        """
         self._running = False
         if hasattr(self, "_queue_id") and self._queue_id:
+            qid = self._queue_id
+            self._queue_id = None  # Clear first to prevent double-delete
             try:
-                self._delete_event_queue(self._queue_id)
+                self._delete_event_queue(qid)
             except Exception:
                 pass
         self.process_mgr.stop_all()

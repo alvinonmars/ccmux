@@ -684,6 +684,20 @@ class TestProcessMgr:
         with patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=False):
             assert mgr.is_alive("stream1", "topic1") is False
 
+    def test_ac5_is_alive_running_process(self, tmp_path: Path) -> None:
+        """AC-5.3b: Live PID + live tmux session → returns True."""
+        from adapters.zulip_adapter.process_mgr import ProcessManager
+
+        cfg = self._make_cfg(tmp_path)
+        pid_dir = cfg.runtime_dir / "stream1" / "topic1"
+        pid_dir.mkdir(parents=True)
+        # Use our own PID (guaranteed alive)
+        (pid_dir / "pid").write_text(str(os.getpid()))
+
+        mgr = ProcessManager(cfg)
+        with patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=True):
+            assert mgr.is_alive("stream1", "topic1") is True
+
     def test_ac5_4_env_template_parsed(self, tmp_path: Path) -> None:
         """AC-5.4: env_template.sh loaded correctly (non-placeholder vars)."""
         from adapters.zulip_adapter.process_mgr import _parse_env_template
@@ -1220,6 +1234,52 @@ class TestReviewFixes:
 
         loop.close()
 
+    def test_ensure_instance_fallback_pid_missing(self, tmp_path: Path) -> None:
+        """Fix: PID file missing but injector task running + tmux alive → no recreate."""
+        from adapters.zulip_adapter.process_mgr import ProcessManager
+        from adapters.zulip_adapter.config import ZulipAdapterConfig, StreamConfig
+
+        cred = tmp_path / "cred.env"
+        cred.write_text("ZULIP_BOT_API_KEY=test\n")
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        cfg = ZulipAdapterConfig(
+            site="https://zulip.example.com",
+            bot_email="bot@example.com",
+            bot_credentials=cred,
+            streams_dir=tmp_path / "streams",
+            env_template=tmp_path / "env.sh",
+            runtime_dir=runtime,
+        )
+        mgr = ProcessManager(cfg)
+
+        # Create FIFO (no PID file → is_alive returns False)
+        fifo_dir = cfg.runtime_dir / "stream" / "topic"
+        fifo_dir.mkdir(parents=True)
+        fifo = fifo_dir / "in.zulip"
+        os.mkfifo(str(fifo))
+
+        # Simulate a live injector task (not done)
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        mgr._injector_tasks["stream/topic"] = future
+
+        sc = StreamConfig(name="stream", project_path=Path("/tmp"))
+
+        try:
+            with patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=True), \
+                 patch.object(mgr, "_lazy_create") as mock_create:
+                result_fifo, created = loop.run_until_complete(
+                    mgr.ensure_instance("stream", "topic", sc)
+                )
+                # Fallback path: no recreate, created=False
+                mock_create.assert_not_called()
+                assert created is False
+                assert result_fifo == fifo
+        finally:
+            future.cancel()
+            loop.close()
+
     def test_fix6_load_api_key_missing_key(self, tmp_path: Path) -> None:
         """Fix 6: _load_api_key raises ValueError when key line is absent."""
         from adapters.zulip_adapter.adapter import _load_api_key
@@ -1268,19 +1328,70 @@ class TestReviewFixes:
         assert result["HTTP_PROXY"] == "http://127.0.0.1:8118"
         assert result["PLAIN_VALUE"] == "no_quotes"
 
-    def test_fix11_old_injector_pid_cleared_on_recreate(self) -> None:
-        """Fix 11: Old injector's pid_file cleared before cancel to prevent race."""
+    def test_fix11_old_injector_pid_cleared_on_recreate(self, tmp_path: Path) -> None:
+        """Fix 11: Old injector's pid_file cleared before cancel to prevent race.
+
+        When _lazy_create replaces an existing injector, it must set the old
+        injector's pid_file to None before cancelling, so the old injector's
+        finally block doesn't delete the new PID file.
+        """
         from adapters.zulip_adapter.injector import Injector
+        from adapters.zulip_adapter.process_mgr import ProcessManager
+        from adapters.zulip_adapter.config import ZulipAdapterConfig, StreamConfig
 
+        cred = tmp_path / "cred.env"
+        cred.write_text("ZULIP_BOT_API_KEY=test\n")
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        cfg = ZulipAdapterConfig(
+            site="https://zulip.example.com",
+            bot_email="bot@example.com",
+            bot_credentials=cred,
+            streams_dir=tmp_path / "streams",
+            env_template=tmp_path / "env.sh",
+            runtime_dir=runtime,
+        )
+        (tmp_path / "streams").mkdir()
+        (tmp_path / "env.sh").write_text("# empty\n")
+        mgr = ProcessManager(cfg)
+
+        # Set up an existing injector with a pid_file
         old_injector = Injector("/tmp/old.fifo", "old-session", pid_file="/tmp/old.pid")
-        assert old_injector.pid_file == "/tmp/old.pid"
+        mgr._injectors["stream/topic"] = old_injector
 
-        # Simulate what process_mgr._lazy_create does before cancelling
-        old_injector.pid_file = None
-        old_injector.stop()
+        # Create a dummy completed task so _lazy_create runs
+        loop = asyncio.new_event_loop()
+        async def _noop():
+            pass
+        old_task = loop.create_task(_noop())
+        loop.run_until_complete(old_task)
+        mgr._injector_tasks["stream/topic"] = old_task
 
-        # Old injector's finally block should be a no-op for pid cleanup
-        assert old_injector.pid_file is None
+        sc = StreamConfig(name="test", project_path=tmp_path)
+
+        # Mock tmux to succeed so _lazy_create reaches the injector replacement code
+        def mock_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            # display-message uses text=True, returns str; others return bytes
+            if kwargs.get("text"):
+                result.stdout = "12345"
+            else:
+                result.stdout = b"12345"
+            result.stderr = b""
+            return result
+
+        try:
+            with patch("subprocess.run", side_effect=mock_run), \
+                 patch("adapters.zulip_adapter.process_mgr.CCMUX_INIT_SCRIPT",
+                       tmp_path / "nonexistent"):
+                loop.run_until_complete(mgr._lazy_create("stream", "topic", sc))
+
+            # The old injector's pid_file should have been cleared by _lazy_create
+            assert old_injector.pid_file is None
+        finally:
+            mgr.stop_all()
+            loop.close()
 
     def test_fix8_bad_event_queue_id_uses_code_field(self, tmp_path: Path) -> None:
         """Fix 8: _get_events detects BAD_EVENT_QUEUE_ID from code field."""
@@ -1813,7 +1924,7 @@ class TestClosedLoopScenarios:
         assert "new-project" in cfg.streams
 
     def test_tmux_new_session_failure_detected(self, tmp_path: Path) -> None:
-        """Bug #10: tmux new-session failure → early return, no injector started."""
+        """Bug #10: tmux new-session failure → returns None, no injector started."""
         from adapters.zulip_adapter.config import StreamConfig
 
         root, adapter = self._make_env(tmp_path)
@@ -1838,8 +1949,9 @@ class TestClosedLoopScenarios:
                    tmp_path / "nonexistent"):
             loop = asyncio.new_event_loop()
             try:
-                fifo = loop.run_until_complete(mgr._lazy_create("stream", "topic", sc))
-                assert fifo is not None
+                result = loop.run_until_complete(mgr._lazy_create("stream", "topic", sc))
+                # tmux failed → returns None
+                assert result is None
                 # No injector task should be started (tmux failed)
                 assert "stream/topic" not in mgr._injector_tasks
             finally:

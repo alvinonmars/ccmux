@@ -206,12 +206,19 @@ class ProcessManager:
             log.warning("Injector task died for %s, recreating instance", key)
 
         result = await self._lazy_create(stream, topic, stream_cfg)
+        if result is None:
+            # tmux creation failed — return FIFO path but not "created"
+            # so caller doesn't send a false "Session started" notification
+            return fifo, False
         return result, True
 
     async def _lazy_create(
         self, stream: str, topic: str, stream_cfg: StreamConfig
-    ) -> Path:
-        """Create a new instance: instance.toml, dirs, FIFO, tmux, injector, PID."""
+    ) -> Path | None:
+        """Create a new instance: instance.toml, dirs, FIFO, tmux, injector, PID.
+
+        Returns FIFO path on success, None on failure (e.g. tmux creation failed).
+        """
         session = _tmux_session_name(stream, topic)
         runtime = _runtime_dir(self.cfg, stream, topic)
         fifo = _fifo_path(self.cfg, stream, topic)
@@ -308,10 +315,10 @@ class ProcessManager:
                     result.returncode,
                     result.stderr.decode(errors="replace").strip(),
                 )
-                return fifo
+                return None
         except subprocess.TimeoutExpired:
             log.error("tmux new-session timed out for %s", session)
-            return fifo
+            return None
 
         # 7. Get pane PID and write to PID file
         try:
