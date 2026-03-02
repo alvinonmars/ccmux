@@ -315,9 +315,11 @@ class ProcessManager:
                     result.returncode,
                     result.stderr.decode(errors="replace").strip(),
                 )
+                self._close_sentinel(key)
                 return None
         except subprocess.TimeoutExpired:
             log.error("tmux new-session timed out for %s", session)
+            self._close_sentinel(key)
             return None
 
         # 7. Get pane PID and write to PID file
@@ -356,6 +358,15 @@ class ProcessManager:
 
         log.info("Instance ready: stream=%s topic=%s", stream, topic)
         return fifo
+
+    def _close_sentinel(self, key: str) -> None:
+        """Close and remove sentinel fd for a key."""
+        if key in self._sentinel_fds:
+            try:
+                os.close(self._sentinel_fds[key])
+            except OSError:
+                pass
+            del self._sentinel_fds[key]
 
     def stop_all(self) -> None:
         """Stop all running injectors and close sentinel fds."""

@@ -120,9 +120,12 @@ class ZulipAdapter:
         self, queue_id: str, last_event_id: int
     ) -> list[dict]:
         """Long-poll for events. Returns list of event dicts."""
+        params = urllib.parse.urlencode(
+            {"queue_id": queue_id, "last_event_id": last_event_id}
+        )
         result = self._api_call(
             "GET",
-            f"/events?queue_id={queue_id}&last_event_id={last_event_id}",
+            f"/events?{params}",
             timeout=POLL_TIMEOUT + 10,
         )
 

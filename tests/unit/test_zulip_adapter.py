@@ -1991,7 +1991,10 @@ class TestClosedLoopScenarios:
         assert "".join(chunks) == content
 
     def test_injector_batches_queued_messages(self) -> None:
-        """AC-3.4: Multiple queued messages joined with separator for injection."""
+        """AC-3.4: Multiple queued messages joined with separator for injection.
+
+        Drives through actual Injector.run() to verify the real batching logic.
+        """
         from adapters.zulip_adapter import injector as inj_mod
         from adapters.zulip_adapter.injector import Injector
 
@@ -1999,21 +2002,30 @@ class TestClosedLoopScenarios:
         # Pre-load queue with multiple messages
         injector._queue = ["msg1", "msg2", "msg3"]
 
-        # Mock gate as ready and _inject_text to capture the combined text
-        with patch.object(injector.gate, "is_ready", return_value=True), \
-             patch.object(inj_mod, "_inject_text") as mock_inject:
-            mock_inject.return_value = True
+        def inject_and_stop(session, text):
+            """Capture the inject call and stop the loop."""
+            injector._running = False
+            return True
 
-            # Simulate the batch injection logic from run()
-            if injector._queue and injector.gate.is_ready():
-                text = "\n---\n".join(injector._queue)
-                if inj_mod._inject_text(injector.tmux_session, text):
-                    injector._queue.clear()
+        # Drive through actual run() with mocks to control the loop
+        with patch.object(inj_mod, "_inject_text", side_effect=inject_and_stop) as mock_inject, \
+             patch.object(inj_mod, "_tmux_has_session", return_value=True), \
+             patch.object(injector.gate, "is_ready", return_value=True), \
+             patch.object(injector.gate, "is_claude_dead", return_value=False), \
+             patch("os.open", return_value=99), \
+             patch("os.read", side_effect=BlockingIOError), \
+             patch("os.close"):
 
-            # Verify _inject_text called once with all messages joined by separator
-            mock_inject.assert_called_once_with("test-session", "msg1\n---\nmsg2\n---\nmsg3")
-            # Queue should be cleared after successful injection
-            assert injector._queue == []
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(injector.run())
+            finally:
+                loop.close()
+
+        # Verify _inject_text called by run() with all messages joined by separator
+        mock_inject.assert_called_once_with("test-session", "msg1\n---\nmsg2\n---\nmsg3")
+        # Queue should be cleared after successful injection
+        assert injector._queue == []
 
     def test_existing_code_unchanged(self) -> None:
         """AC-8.1: No modifications to ccmux/ or adapters/wa_notifier/."""
