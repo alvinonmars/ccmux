@@ -21,8 +21,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from ccmux.paths import ANNOUNCEMENTS_DIR
-FIFO_PATH = Path("/tmp/ccmux/in.butler")
+from ccmux.paths import ANNOUNCEMENTS_DIR, RUNTIME_DIR
+FIFO_PATH = RUNTIME_DIR / "in.butler"
 
 
 def main() -> None:

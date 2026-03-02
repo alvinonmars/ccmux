@@ -73,7 +73,9 @@ def load(project_root: Path | None = None) -> Config:
 
     return Config(
         project_name=project_name,
-        runtime_dir=Path(runtime.get("dir", "/tmp/ccmux")),
+        runtime_dir=Path(runtime.get("dir", os.path.join(
+            os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "ccmux"
+        ))),
         idle_threshold=timing.get("idle_threshold", 30),
         silence_timeout=timing.get("silence_timeout", 3),
         backoff_initial=recovery.get("backoff_initial", 1),

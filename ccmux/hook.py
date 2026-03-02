@@ -64,27 +64,30 @@ def _get_control_sock(cwd: str) -> str:
     Priority:
     1. CCMUX_CONTROL_SOCK environment variable (for testing and explicit override)
     2. ccmux.toml in cwd
-    3. Default: /tmp/ccmux/control.sock
+    3. Default: $XDG_RUNTIME_DIR/ccmux/control.sock
     """
     env_override = os.environ.get("CCMUX_CONTROL_SOCK")
     if env_override:
         return env_override
+    _default_runtime = os.path.join(
+        os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "ccmux"
+    )
     try:
         toml_path = Path(cwd) / "ccmux.toml"
         if toml_path.exists():
             if tomllib is not None:
                 with open(toml_path, "rb") as f:
                     data = tomllib.load(f)
-                runtime_dir = data.get("runtime", {}).get("dir", "/tmp/ccmux")
+                runtime_dir = data.get("runtime", {}).get("dir", _default_runtime)
             else:
                 # Fallback for Python < 3.11: regex extraction
                 text = toml_path.read_text()
                 m = re.search(r'^\s*dir\s*=\s*"([^"]+)"', text, re.MULTILINE)
-                runtime_dir = m.group(1) if m else "/tmp/ccmux"
+                runtime_dir = m.group(1) if m else _default_runtime
             return str(Path(runtime_dir) / "control.sock")
     except Exception:
         pass
-    return "/tmp/ccmux/control.sock"
+    return str(Path(_default_runtime) / "control.sock")
 
 
 def _read_last_assistant_turn(transcript_path: str) -> list[dict] | None:

@@ -15,6 +15,7 @@ dependencies = [
 ccmux = "ccmux.daemon:main"
 ccmux-wa-notifier = "adapters.wa_notifier.__main__:main"
 ccmux-deploy = "ccmux.reconcile:main"
+ccmux-zulip-notifier = "adapters.zulip_adapter.__main__:main"
 
 [project.optional-dependencies]
 dev = [

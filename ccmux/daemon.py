@@ -292,10 +292,21 @@ class Daemon:
             self._fifo_mgr.add(path)
 
     def _on_fifo_remove(self, path: Path) -> None:
-        """Called when an input FIFO is removed."""
-        log.info("FIFO deregistered", path=str(path))
+        """Called when an input FIFO is removed.
+
+        Auto-recreates the FIFO to self-heal from accidental deletion.
+        """
+        log.warning("FIFO deleted externally, recreating", path=str(path))
         if self._fifo_mgr:
             self._fifo_mgr.remove(path)
+        try:
+            if not path.exists():
+                os.mkfifo(str(path))
+                log.info("FIFO recreated", path=str(path))
+                if self._fifo_mgr:
+                    self._fifo_mgr.add(path)
+        except OSError as e:
+            log.error("FIFO recreation failed: %s", e, path=str(path))
 
     def _on_silence_ready(self) -> None:
         """Called when stdout silence detector fires (fallback ready detection)."""

@@ -38,14 +38,14 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from ccmux.paths import EMAIL_SCAN_DIR
+from ccmux.paths import EMAIL_SCAN_DIR, RUNTIME_DIR
 from libs.web_agent.browser import BrowserSession
 from libs.web_agent.auth.school_email import login
 
 STATE_DIR = Path("/tmp/web_agent_outlook_state")
 SCREENSHOT_DIR = EMAIL_SCAN_DIR
 SCAN_STATE_PATH = SCREENSHOT_DIR / "last_scan.json"
-FIFO_PATH = Path("/tmp/ccmux/in.email")
+FIFO_PATH = RUNTIME_DIR / "in.email"
 
 # Patterns for detecting email dates from aria-label
 _TIME_RE = re.compile(r"\b(\d{1,2}:\d{2})\b")

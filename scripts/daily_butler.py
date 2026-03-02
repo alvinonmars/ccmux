@@ -36,7 +36,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from ccmux.paths import BUTLER_DIR, FAMILY_CONTEXT, DAILY_REFLECTIONS_DIR
+from ccmux.paths import BUTLER_DIR, FAMILY_CONTEXT, DAILY_REFLECTIONS_DIR, RUNTIME_DIR
 
 STATE_DIR = Path(
     os.environ.get(
@@ -44,7 +44,7 @@ STATE_DIR = Path(
         str(BUTLER_DIR),
     )
 )
-FIFO_PATH = Path("/tmp/ccmux/in.butler")
+FIFO_PATH = RUNTIME_DIR / "in.butler"
 TODAY = date.today()
 TODAY_ISO = TODAY.isoformat()
 NOW = datetime.now()
