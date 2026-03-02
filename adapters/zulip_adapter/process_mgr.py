@@ -117,6 +117,9 @@ def _parse_env_template(template_path: Path) -> dict[str, str]:
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip()
+        # Strip surrounding quotes (shell-standard quoting)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
         # Skip template placeholders like ${STREAM_NAME}
         if "${" in value:
             continue
@@ -314,8 +317,10 @@ class ProcessManager:
 
         # 8. Start FIFO injector as an asyncio task
         key = f"{stream}/{topic}"
-        # Stop existing injector if any
+        # Stop existing injector if any — clear pid_file first to prevent
+        # the old injector's finally block from deleting the new PID file
         if key in self._injectors:
+            self._injectors[key].pid_file = None  # Prevent stale cleanup
             self._injectors[key].stop()
         if key in self._injector_tasks:
             self._injector_tasks[key].cancel()

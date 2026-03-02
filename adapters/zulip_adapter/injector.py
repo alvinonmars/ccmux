@@ -78,14 +78,24 @@ def _tmux_has_session(session: str) -> bool:
 def _inject_text(session: str, text: str) -> bool:
     """Inject text into tmux session via send-keys. Returns True on success."""
     try:
-        subprocess.run(
+        r1 = subprocess.run(
             ["tmux", "send-keys", "-t", session, "-l", text],
+            capture_output=True,
             timeout=SEND_KEYS_TIMEOUT,
         )
-        subprocess.run(
+        if r1.returncode != 0:
+            log.error("send-keys text failed (rc=%d): %s", r1.returncode,
+                       r1.stderr.decode(errors="replace").strip())
+            return False
+        r2 = subprocess.run(
             ["tmux", "send-keys", "-t", session, "Enter"],
+            capture_output=True,
             timeout=SEND_KEYS_TIMEOUT,
         )
+        if r2.returncode != 0:
+            log.error("send-keys Enter failed (rc=%d): %s", r2.returncode,
+                       r2.stderr.decode(errors="replace").strip())
+            return False
         return True
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         log.error("send-keys failed: %s", e)

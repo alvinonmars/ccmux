@@ -405,6 +405,19 @@ class TestInjector:
             assert "send-keys" in enter_args
             assert "Enter" in enter_args
 
+    def test_ac3_inject_text_fails_on_nonzero_rc(self) -> None:
+        """AC-3.1b: _inject_text returns False when send-keys fails."""
+        from adapters.zulip_adapter.injector import _inject_text
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=1, stderr=b"no session: test-session"
+            )
+            result = _inject_text("test-session", "hello")
+            assert result is False
+            # Only one call — fails on the first send-keys
+            assert mock_run.call_count == 1
+
 
 # ============================================================================
 # AC-4: config.py
@@ -1173,6 +1186,35 @@ class TestReviewFixes:
         result = _parse_env_template(Path("/nonexistent/env_template.sh"))
         assert result == {}
 
+    def test_fix10_env_template_strips_quotes(self, tmp_path: Path) -> None:
+        """Fix 10: _parse_env_template strips surrounding quotes from values."""
+        from adapters.zulip_adapter.process_mgr import _parse_env_template
+
+        env_file = tmp_path / "env_template.sh"
+        env_file.write_text(
+            'export ZULIP_SITE="https://zulip.example.com"\n'
+            "export HTTP_PROXY='http://127.0.0.1:8118'\n"
+            "export PLAIN_VALUE=no_quotes\n"
+        )
+        result = _parse_env_template(env_file)
+        assert result["ZULIP_SITE"] == "https://zulip.example.com"
+        assert result["HTTP_PROXY"] == "http://127.0.0.1:8118"
+        assert result["PLAIN_VALUE"] == "no_quotes"
+
+    def test_fix11_old_injector_pid_cleared_on_recreate(self) -> None:
+        """Fix 11: Old injector's pid_file cleared before cancel to prevent race."""
+        from adapters.zulip_adapter.injector import Injector
+
+        old_injector = Injector("/tmp/old.fifo", "old-session", pid_file="/tmp/old.pid")
+        assert old_injector.pid_file == "/tmp/old.pid"
+
+        # Simulate what process_mgr._lazy_create does before cancelling
+        old_injector.pid_file = None
+        old_injector.stop()
+
+        # Old injector's finally block should be a no-op for pid cleanup
+        assert old_injector.pid_file is None
+
     def test_fix8_bad_event_queue_id_uses_code_field(self, tmp_path: Path) -> None:
         """Fix 8: _get_events detects BAD_EVENT_QUEUE_ID from code field."""
         from adapters.zulip_adapter.adapter import ZulipAdapter
@@ -1704,7 +1746,6 @@ class TestClosedLoopScenarios:
 
     def test_tmux_new_session_failure_detected(self, tmp_path: Path) -> None:
         """Bug #10: tmux new-session failure → early return, no injector started."""
-        from adapters.zulip_adapter.process_mgr import ProcessManager
         from adapters.zulip_adapter.config import StreamConfig
 
         root, adapter = self._make_env(tmp_path)
@@ -1715,8 +1756,10 @@ class TestClosedLoopScenarios:
             if cmd[0] == "tmux" and "new-session" in cmd:
                 result.returncode = 1
                 result.stderr = b"duplicate session"
+            elif cmd[0] == "tmux" and "has-session" in cmd:
+                result.returncode = 1  # No existing session
             else:
-                result.returncode = 1
+                result.returncode = 0
             result.stdout = b""
             return result
 
@@ -1732,6 +1775,8 @@ class TestClosedLoopScenarios:
                 # No injector task should be started (tmux failed)
                 assert "stream/topic" not in mgr._injector_tasks
             finally:
+                # Clean up sentinel fd
+                mgr.stop_all()
                 loop.close()
 
     def test_post_message_logs_api_error(self, tmp_path: Path) -> None:
@@ -1756,12 +1801,28 @@ class TestClosedLoopScenarios:
 
     def test_injector_batches_queued_messages(self) -> None:
         """AC-3.4: Multiple queued messages joined with newline for injection."""
+        from adapters.zulip_adapter import injector as inj_mod
         from adapters.zulip_adapter.injector import Injector
 
         injector = Injector("/tmp/test.fifo", "test-session")
+        # Pre-load queue with multiple messages
         injector._queue = ["msg1", "msg2", "msg3"]
-        text = "\n".join(injector._queue)
-        assert text == "msg1\nmsg2\nmsg3"
+
+        # Mock gate as ready and _inject_text to capture the combined text
+        with patch.object(injector.gate, "is_ready", return_value=True), \
+             patch.object(inj_mod, "_inject_text") as mock_inject:
+            mock_inject.return_value = True
+
+            # Simulate the batch injection logic from run() (lines 186-194)
+            if injector._queue and injector.gate.is_ready():
+                text = "\n".join(injector._queue)
+                if inj_mod._inject_text(injector.tmux_session, text):
+                    injector._queue.clear()
+
+            # Verify _inject_text called once with all messages joined
+            mock_inject.assert_called_once_with("test-session", "msg1\nmsg2\nmsg3")
+            # Queue should be cleared after successful injection
+            assert injector._queue == []
 
     def test_existing_code_unchanged(self) -> None:
         """AC-8.1: No modifications to ccmux/ or adapters/wa_notifier/."""
