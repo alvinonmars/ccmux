@@ -874,17 +874,15 @@ class TestZulipHelpers:
 
     HELPER_SCRIPT = Path(__file__).resolve().parent.parent.parent / "scripts" / "zulip_helpers.py"
 
-    def test_ac6b_5_invalid_credentials(self, tmp_path: Path) -> None:
+    def test_ac6b_5_invalid_credentials(self, tmp_path: Path, monkeypatch) -> None:
         """AC-6b.5: Invalid credentials → clear error."""
         cred_file = tmp_path / "empty_cred.env"
         cred_file.write_text("# no credentials\n")
 
-        env = {k: v for k, v in os.environ.items()}
-        env.pop("ZULIP_SITE", None)
-        env.pop("ZULIP_BOT_EMAIL", None)
-        env.pop("ZULIP_BOT_API_KEY", None)
+        # Clear Zulip env vars to prevent fallback from masking the error
+        for key in ("ZULIP_SITE", "ZULIP_BOT_EMAIL", "ZULIP_BOT_API_KEY"):
+            monkeypatch.delenv(key, raising=False)
 
-        # Import and test directly to use the empty cred file
         from scripts.zulip_helpers import _load_credentials
 
         with pytest.raises(SystemExit):
@@ -1178,6 +1176,22 @@ class TestReviewFixes:
 
         with pytest.raises(ValueError, match="ZULIP_BOT_API_KEY not found"):
             _load_api_key(cred)
+
+    def test_fix12_load_api_key_strips_quotes(self, tmp_path: Path) -> None:
+        """Fix 12: _load_api_key strips surrounding quotes from value."""
+        from adapters.zulip_adapter.adapter import _load_api_key
+
+        cred = tmp_path / "quoted.env"
+        cred.write_text('ZULIP_BOT_API_KEY="myapikey123"\n')
+        assert _load_api_key(cred) == "myapikey123"
+
+        cred2 = tmp_path / "single_quoted.env"
+        cred2.write_text("ZULIP_BOT_API_KEY='myapikey456'\n")
+        assert _load_api_key(cred2) == "myapikey456"
+
+        cred3 = tmp_path / "unquoted.env"
+        cred3.write_text("ZULIP_BOT_API_KEY=plainkey789\n")
+        assert _load_api_key(cred3) == "plainkey789"
 
     def test_fix7_env_template_missing_file(self) -> None:
         """Fix 7: _parse_env_template returns empty dict for nonexistent file."""

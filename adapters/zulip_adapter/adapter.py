@@ -39,7 +39,10 @@ def _load_api_key(credentials_path: Path) -> str:
     for line in credentials_path.read_text().splitlines():
         line = line.strip()
         if line.startswith("ZULIP_BOT_API_KEY="):
-            return line.split("=", 1)[1].strip()
+            value = line.split("=", 1)[1].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            return value
 
     raise ValueError(f"ZULIP_BOT_API_KEY not found in {credentials_path}")
 

@@ -39,7 +39,10 @@ def main() -> None:
     with open(key_file) as f:
         for line in f:
             if line.startswith("ZULIP_BOT_API_KEY="):
-                api_key = line.split("=", 1)[1].strip()
+                value = line.split("=", 1)[1].strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                    value = value[1:-1]
+                api_key = value
     if not api_key:
         return
 

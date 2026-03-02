@@ -31,15 +31,21 @@ def _load_credentials(cred_file: str | None = None) -> tuple[str, str, str]:
     email = ""
     api_key = ""
 
+    def _strip_quotes(v: str) -> str:
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+            v = v[1:-1]
+        return v
+
     with open(cred_file) as f:
         for line in f:
             line = line.strip()
             if line.startswith("ZULIP_SITE="):
-                site = line.split("=", 1)[1]
+                site = _strip_quotes(line.split("=", 1)[1])
             elif line.startswith("ZULIP_BOT_EMAIL="):
-                email = line.split("=", 1)[1]
+                email = _strip_quotes(line.split("=", 1)[1])
             elif line.startswith("ZULIP_BOT_API_KEY="):
-                api_key = line.split("=", 1)[1]
+                api_key = _strip_quotes(line.split("=", 1)[1])
 
     if not all([site, email, api_key]):
         # Fall back to env vars
