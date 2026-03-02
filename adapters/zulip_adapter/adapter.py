@@ -224,9 +224,12 @@ class ZulipAdapter:
             # Notify in Zulip that a new session started
             self._post_message(stream, topic, "\U0001f916 Session started.")
 
-        # Format message with timestamp and source
-        now = datetime.now().strftime("%H:%M")
-        formatted = f"[{now} zulip] {content}"
+        # Prefix with timestamp and channel so Claude Code knows when
+        # and where the message came from. Each topic is an isolated
+        # single-user instance, so sender name is omitted.
+        # Format: [yy/mm/dd hh:mm From zulip]
+        now = datetime.now().strftime("%y/%m/%d %H:%M")
+        formatted = f"[{now} From zulip] {content}"
 
         # Write to FIFO in executor to avoid blocking the event loop
         # (prevents deadlock if pipe buffer fills during message burst)

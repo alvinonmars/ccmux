@@ -66,3 +66,6 @@ scripts/filter-repo-mailmap
 scripts/git_history_rewrite_plan.md
 # Legacy discussion files (moved to discussions/)
 
+# Commercial discussion (symlink to external repo)
+commercial-discuss
+

@@ -1605,9 +1605,9 @@ class TestClosedLoopScenarios:
             data = os.read(sentinel_fd, 4096)
             decoded = data.decode("utf-8")
             assert "fix the auth bug" in decoded
-            assert "zulip" in decoded
+            # Format: [yy/mm/dd hh:mm From zulip] content
             import re
-            assert re.search(r"\[\d{2}:\d{2} zulip\]", decoded)
+            assert re.search(r"\[\d{2}/\d{2}/\d{2} \d{2}:\d{2} From zulip\]", decoded)
         finally:
             os.close(sentinel_fd)
 
