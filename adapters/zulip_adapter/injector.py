@@ -184,9 +184,9 @@ class Injector:
                     chunk = os.read(fd, 4096)
                     if chunk:
                         buffer += chunk
-                        while b"\n" in buffer:
-                            line, buffer = buffer.split(b"\n", 1)
-                            msg = line.decode("utf-8", errors="replace").strip()
+                        while b"\0" in buffer:
+                            frame, buffer = buffer.split(b"\0", 1)
+                            msg = frame.decode("utf-8", errors="replace").strip()
                             if msg:
                                 self._queue.append(msg)
                 except BlockingIOError:

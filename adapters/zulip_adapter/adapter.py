@@ -160,11 +160,14 @@ class ZulipAdapter:
         ensures a reader is always present, so open() will not block and
         writes are safe from ENXIO. Blocking mode avoids partial writes
         that could corrupt messages when using O_NONBLOCK.
+
+        Messages are NUL-delimited (\\0) to preserve multi-line content.
+        The injector splits on NUL instead of newline.
         """
         try:
             fd = os.open(str(fifo_path), os.O_WRONLY)
             try:
-                data = (message + "\n").encode("utf-8")
+                data = (message + "\0").encode("utf-8")
                 total = len(data)
                 written = 0
                 while written < total:

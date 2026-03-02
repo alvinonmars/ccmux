@@ -823,7 +823,7 @@ class TestAdapter:
             assert result is True
 
             data = os.read(read_fd, 4096)
-            assert data == b"test message\n"
+            assert data == b"test message\0"
         finally:
             os.close(read_fd)
 
@@ -851,7 +851,51 @@ class TestAdapter:
 
             # Data readable from the sentinel fd
             data = os.read(sentinel_fd, 4096)
-            assert data == b"test message\n"
+            assert data == b"test message\0"
+        finally:
+            os.close(sentinel_fd)
+
+    def test_ac6_write_to_fifo_multiline_preserved(self, tmp_path: Path) -> None:
+        """AC-6: Multi-line messages preserved via NUL-delimited framing."""
+        adapter = self._make_adapter(tmp_path)
+
+        fifo_path = tmp_path / "test.fifo"
+        os.mkfifo(str(fifo_path))
+        sentinel_fd = os.open(str(fifo_path), os.O_RDONLY | os.O_NONBLOCK)
+
+        try:
+            # Multi-line message (code block with newlines)
+            msg = "[12:00 zulip] Here is code:\ndef hello():\n    print('hi')"
+            result = adapter._write_to_fifo(fifo_path, msg)
+            assert result is True
+
+            # Read raw data — NUL delimited, newlines preserved
+            raw = os.read(sentinel_fd, 8192)
+            assert raw == (msg + "\0").encode("utf-8")
+
+            # Simulate injector splitting on NUL
+            frames = raw.split(b"\0")
+            assert frames[0].decode("utf-8") == msg
+        finally:
+            os.close(sentinel_fd)
+
+    def test_ac6_write_to_fifo_backslash_preserved(self, tmp_path: Path) -> None:
+        """AC-6: Backslashes in messages preserved via NUL-delimited framing."""
+        adapter = self._make_adapter(tmp_path)
+
+        fifo_path = tmp_path / "test.fifo"
+        os.mkfifo(str(fifo_path))
+        sentinel_fd = os.open(str(fifo_path), os.O_RDONLY | os.O_NONBLOCK)
+
+        try:
+            msg = r"path is C:\Users\test\new_file.txt"
+            result = adapter._write_to_fifo(fifo_path, msg)
+            assert result is True
+
+            raw = os.read(sentinel_fd, 8192)
+            # NUL-delimited, content preserved exactly
+            frames = raw.split(b"\0")
+            assert frames[0].decode("utf-8") == msg
         finally:
             os.close(sentinel_fd)
 
@@ -1040,7 +1084,7 @@ class TestReviewFixes:
 
             # Data survives in buffer, readable via sentinel
             data = os.read(sentinel_fd, 4096)
-            assert data == b"first message\n"
+            assert data == b"first message\0"
         finally:
             os.close(sentinel_fd)
 
@@ -1397,7 +1441,7 @@ class TestClosedLoopScenarios:
 
             # Data is readable from sentinel fd (this is what injector would read)
             data = os.read(sentinel_fd, 4096)
-            assert data == b"[12:34 zulip] fix the auth bug\n"
+            assert data == b"[12:34 zulip] fix the auth bug\0"
         finally:
             os.close(sentinel_fd)
 
@@ -1711,7 +1755,7 @@ class TestClosedLoopScenarios:
 
         # Data readable
         data = os.read(sentinel_fd, 4096)
-        assert data == b"hello\n"
+        assert data == b"hello\0"
 
         # stop_all closes sentinel
         mgr.stop_all()
