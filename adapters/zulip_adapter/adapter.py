@@ -151,13 +151,15 @@ class ZulipAdapter:
             )
 
     def _write_to_fifo(self, fifo_path: Path, message: str) -> bool:
-        """Write message to FIFO (non-blocking). Returns True on success.
+        """Write message to FIFO. Returns True on success.
 
-        Uses O_WRONLY | O_NONBLOCK. Requires a reader to be present —
-        process_mgr keeps a sentinel fd open on each FIFO to ensure this.
+        Uses O_WRONLY (blocking). The sentinel fd kept open by process_mgr
+        ensures a reader is always present, so open() will not block and
+        writes are safe from ENXIO. Blocking mode avoids partial writes
+        that could corrupt messages when using O_NONBLOCK.
         """
         try:
-            fd = os.open(str(fifo_path), os.O_WRONLY | os.O_NONBLOCK)
+            fd = os.open(str(fifo_path), os.O_WRONLY)
             try:
                 data = (message + "\n").encode("utf-8")
                 total = len(data)
@@ -267,7 +269,7 @@ class ZulipAdapter:
 
     def _delete_event_queue(self, queue_id: str) -> None:
         """Delete the event queue to unblock the long-poll immediately."""
-        self._api_call("DELETE", f"/events?queue_id={queue_id}", timeout=5)
+        self._api_call("DELETE", "/events", data={"queue_id": queue_id}, timeout=5)
 
     def stop(self) -> None:
         """Signal the adapter to stop. Deletes event queue to unblock long-poll."""
