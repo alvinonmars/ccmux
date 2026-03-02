@@ -271,11 +271,15 @@ class TestZulipRelayHook:
 
     def test_ac2_10_default_topic(self, tmp_path: Path) -> None:
         """AC-2.10: ZULIP_TOPIC not set → falls back to 'chat'."""
+        # Verify source code contains the "chat" default for ZULIP_TOPIC
+        source = self.HOOK_SCRIPT.read_text()
+        assert 'os.environ.get("ZULIP_TOPIC", "chat")' in source, \
+            "Default topic 'chat' not found in relay hook source"
+
         cred_file = tmp_path / "cred.env"
         cred_file.write_text("ZULIP_BOT_API_KEY=test123\n")
 
-        # We can't easily test the actual API call without mocking,
-        # but we can verify the script runs without error when ZULIP_TOPIC is unset
+        # Verify the script runs without error when ZULIP_TOPIC is unset
         result = self._run_hook(
             '{"last_assistant_message": "hello"}',
             env_override={
@@ -675,7 +679,10 @@ class TestProcessMgr:
         (pid_dir / "pid").write_text("999999999")
 
         mgr = ProcessManager(cfg)
-        assert mgr.is_alive("stream1", "topic1") is False
+        # Explicitly mock _tmux_has_session to avoid real tmux calls
+        # and ensure test doesn't depend on short-circuit evaluation order
+        with patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=False):
+            assert mgr.is_alive("stream1", "topic1") is False
 
     def test_ac5_4_env_template_parsed(self, tmp_path: Path) -> None:
         """AC-5.4: env_template.sh loaded correctly (non-placeholder vars)."""
@@ -1469,8 +1476,7 @@ class TestClosedLoopScenarios:
         try:
             # Mock only: tmux has-session (true) and scan_streams (skip mtime check)
             with patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=True), \
-                 patch.object(adapter.process_mgr, "ensure_instance", return_value=fifo), \
-                 patch.object(adapter.process_mgr, "is_alive", return_value=True), \
+                 patch.object(adapter.process_mgr, "ensure_instance", return_value=(fifo, False)), \
                  patch("adapters.zulip_adapter.adapter.scan_streams"):
 
                 loop = asyncio.new_event_loop()
@@ -1506,8 +1512,7 @@ class TestClosedLoopScenarios:
         event = self._zulip_event("dev-project", "new-topic", "hello world")
 
         try:
-            with patch.object(adapter.process_mgr, "is_alive", return_value=False), \
-                 patch.object(adapter.process_mgr, "ensure_instance", return_value=fifo), \
+            with patch.object(adapter.process_mgr, "ensure_instance", return_value=(fifo, True)), \
                  patch.object(adapter, "_post_message") as mock_post, \
                  patch("adapters.zulip_adapter.adapter.scan_streams"):
 
@@ -1543,8 +1548,7 @@ class TestClosedLoopScenarios:
         event = self._zulip_event("dev-project", "active-topic", "follow-up")
 
         try:
-            with patch.object(adapter.process_mgr, "is_alive", return_value=True), \
-                 patch.object(adapter.process_mgr, "ensure_instance", return_value=fifo), \
+            with patch.object(adapter.process_mgr, "ensure_instance", return_value=(fifo, False)), \
                  patch.object(adapter, "_post_message") as mock_post, \
                  patch("adapters.zulip_adapter.adapter.scan_streams"):
 
@@ -1616,9 +1620,8 @@ class TestClosedLoopScenarios:
                 ("project-beta", "beta message"),
             ]:
                 event = self._zulip_event(stream_name, "topic", msg_text)
-                with patch.object(adapter.process_mgr, "is_alive", return_value=True), \
-                     patch.object(adapter.process_mgr, "ensure_instance",
-                                  return_value=fifos[stream_name]), \
+                with patch.object(adapter.process_mgr, "ensure_instance",
+                                  return_value=(fifos[stream_name], False)), \
                      patch("adapters.zulip_adapter.adapter.scan_streams"):
 
                     loop = asyncio.new_event_loop()
@@ -1856,8 +1859,19 @@ class TestClosedLoopScenarios:
 
     def test_message_split_at_9500_chars(self) -> None:
         """AC-2.5: Relay hook splits messages at 9500 char boundary."""
+        import re
+
+        # Verify the actual source code uses 9500 as chunk size
+        hook_script = Path(__file__).resolve().parent.parent.parent / "scripts" / "zulip_relay_hook.py"
+        source = hook_script.read_text()
+        match = re.search(r"i \+ (\d+)", source)
+        assert match, "Chunk size pattern not found in relay hook source"
+        chunk_size = int(match.group(1))
+        assert chunk_size == 9500, f"Expected chunk size 9500, got {chunk_size}"
+
+        # Verify splitting math with the source-derived constant
         content = "X" * 20000
-        chunks = [content[i : i + 9500] for i in range(0, len(content), 9500)]
+        chunks = [content[i : i + chunk_size] for i in range(0, len(content), chunk_size)]
         assert len(chunks) == 3
         assert len(chunks[0]) == 9500
         assert len(chunks[1]) == 9500
@@ -1865,7 +1879,7 @@ class TestClosedLoopScenarios:
         assert "".join(chunks) == content
 
     def test_injector_batches_queued_messages(self) -> None:
-        """AC-3.4: Multiple queued messages joined with newline for injection."""
+        """AC-3.4: Multiple queued messages joined with separator for injection."""
         from adapters.zulip_adapter import injector as inj_mod
         from adapters.zulip_adapter.injector import Injector
 
@@ -1878,14 +1892,14 @@ class TestClosedLoopScenarios:
              patch.object(inj_mod, "_inject_text") as mock_inject:
             mock_inject.return_value = True
 
-            # Simulate the batch injection logic from run() (lines 186-194)
+            # Simulate the batch injection logic from run()
             if injector._queue and injector.gate.is_ready():
-                text = "\n".join(injector._queue)
+                text = "\n---\n".join(injector._queue)
                 if inj_mod._inject_text(injector.tmux_session, text):
                     injector._queue.clear()
 
-            # Verify _inject_text called once with all messages joined
-            mock_inject.assert_called_once_with("test-session", "msg1\nmsg2\nmsg3")
+            # Verify _inject_text called once with all messages joined by separator
+            mock_inject.assert_called_once_with("test-session", "msg1\n---\nmsg2\n---\nmsg3")
             # Queue should be cleared after successful injection
             assert injector._queue == []
 

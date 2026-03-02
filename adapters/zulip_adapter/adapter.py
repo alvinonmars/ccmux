@@ -213,10 +213,9 @@ class ZulipAdapter:
         stream_cfg = self.cfg.streams[stream]
 
         # Ensure instance is alive (lazy create if needed)
-        was_alive = self.process_mgr.is_alive(stream, topic)
-        fifo = await self.process_mgr.ensure_instance(stream, topic, stream_cfg)
+        fifo, created = await self.process_mgr.ensure_instance(stream, topic, stream_cfg)
 
-        if not was_alive:
+        if created:
             # Notify in Zulip that a new session started
             self._post_message(stream, topic, "\U0001f916 Session started.")
 
@@ -226,7 +225,7 @@ class ZulipAdapter:
 
         # Write to FIFO in executor to avoid blocking the event loop
         # (prevents deadlock if pipe buffer fills during message burst)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         success = await loop.run_in_executor(
             None, self._write_to_fifo, fifo, formatted
         )
@@ -249,7 +248,7 @@ class ZulipAdapter:
         while self._running:
             try:
                 log.info("Registering Zulip event queue...")
-                queue_id, last_event_id = await asyncio.get_event_loop().run_in_executor(
+                queue_id, last_event_id = await asyncio.get_running_loop().run_in_executor(
                     None, self._register_event_queue
                 )
                 self._queue_id = queue_id
@@ -257,7 +256,7 @@ class ZulipAdapter:
                 backoff = INITIAL_BACKOFF  # Reset on success
 
                 while self._running:
-                    events = await asyncio.get_event_loop().run_in_executor(
+                    events = await asyncio.get_running_loop().run_in_executor(
                         None, self._get_events, queue_id, last_event_id
                     )
 

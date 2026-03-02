@@ -69,6 +69,7 @@ def main() -> None:
             f"{site}/api/v1/messages", data=post_data, method="POST"
         )
         req.add_header("Authorization", f"Basic {cred}")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
         try:
             urllib.request.urlopen(req, timeout=10)
         except Exception as e:

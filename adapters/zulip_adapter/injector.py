@@ -194,7 +194,7 @@ class Injector:
 
                 # Try to inject queued messages
                 if self._queue and self.gate.is_ready():
-                    text = "\n".join(self._queue)
+                    text = "\n---\n".join(self._queue)
                     if _inject_text(self.tmux_session, text):
                         log.info(
                             "Injected %d message(s) into %s",

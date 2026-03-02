@@ -46,7 +46,9 @@ def main() -> int:
 
     def _shutdown(sig: int, frame) -> None:
         log.info("Received signal %d, shutting down...", sig)
-        adapter.stop()
+        # Schedule stop on the event loop thread to avoid blocking I/O
+        # (adapter.stop() calls _delete_event_queue which does urllib I/O)
+        loop.call_soon_threadsafe(adapter.stop)
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)

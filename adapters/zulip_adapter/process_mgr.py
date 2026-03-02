@@ -173,8 +173,12 @@ class ProcessManager:
 
     async def ensure_instance(
         self, stream: str, topic: str, stream_cfg: StreamConfig
-    ) -> Path:
-        """Ensure instance is running. Lazy creates if needed. Returns FIFO path."""
+    ) -> tuple[Path, bool]:
+        """Ensure instance is running. Lazy creates if needed.
+
+        Returns (fifo_path, created) where created is True if a new instance
+        was spawned (so the caller can send a "Session started" notification).
+        """
         fifo = _fifo_path(self.cfg, stream, topic)
         key = f"{stream}/{topic}"
 
@@ -185,7 +189,7 @@ class ProcessManager:
         )
 
         if self.is_alive(stream, topic) and fifo.exists() and not injector_dead:
-            return fifo
+            return fifo, False
 
         # Fallback: injector task running + tmux alive = instance is OK
         # (covers case where PID file write failed in _lazy_create step 7)
@@ -196,12 +200,13 @@ class ProcessManager:
             and _tmux_has_session(_tmux_session_name(stream, topic))
         ):
             log.debug("PID file missing but injector+tmux alive for %s", key)
-            return fifo
+            return fifo, False
 
         if injector_dead:
             log.warning("Injector task died for %s, recreating instance", key)
 
-        return await self._lazy_create(stream, topic, stream_cfg)
+        result = await self._lazy_create(stream, topic, stream_cfg)
+        return result, True
 
     async def _lazy_create(
         self, stream: str, topic: str, stream_cfg: StreamConfig
