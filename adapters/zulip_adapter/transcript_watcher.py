@@ -35,6 +35,9 @@ POLL_INTERVAL = 2.0
 # Maximum length of tool input to show in status updates
 MAX_INPUT_DISPLAY = 120
 
+# Zulip message size limit is 10000 chars. Keep status messages under this.
+MAX_STATUS_MESSAGE_CHARS = 9000
+
 # Tool name → emoji mapping for Zulip status messages
 TOOL_EMOJI = {
     "Bash": "\u2699\ufe0f",       # ⚙️
@@ -376,8 +379,18 @@ class TranscriptWatcher:
         return lines
 
     async def _update_status_message(self) -> None:
-        """Update the single status message with all accumulated lines."""
+        """Update the single status message with all accumulated lines.
+
+        Trims old lines when the accumulated content would exceed Zulip's
+        message size limit (~10K chars), keeping the most recent entries.
+        """
         content = "\n".join(self._status_lines)
+        if len(content) > MAX_STATUS_MESSAGE_CHARS:
+            # Keep newest lines, trim from the front
+            while len(content) > MAX_STATUS_MESSAGE_CHARS and len(self._status_lines) > 1:
+                self._status_lines.pop(0)
+                content = "\n".join(self._status_lines)
+            content = "...(earlier status trimmed)\n" + content
         loop = asyncio.get_running_loop()
 
         if self._status_msg_id:

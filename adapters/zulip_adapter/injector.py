@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import time
 
 log = logging.getLogger(__name__)
@@ -20,6 +21,13 @@ log = logging.getLogger(__name__)
 IDLE_THRESHOLD = 5.0  # seconds of terminal idle before injecting
 POLL_INTERVAL = 1.0  # seconds between ready-state checks
 SEND_KEYS_TIMEOUT = 10  # seconds
+
+# tmux send-keys has a text length limit (~2KB safe). Beyond this, use
+# load-buffer + paste-buffer which has no practical limit.
+SEND_KEYS_MAX_BYTES = 2048
+
+# Maximum consecutive injection failures before discarding the message batch.
+MAX_INJECT_RETRIES = 5
 
 # Claude Code prompt pattern (❯ character, possibly followed by hint text)
 CLAUDE_PROMPT_RE = re.compile(r"❯", re.MULTILINE)
@@ -76,11 +84,22 @@ def _tmux_has_session(session: str) -> bool:
 
 
 def _inject_text(session: str, text: str) -> bool:
-    """Inject text into tmux session via send-keys. Returns True on success.
+    """Inject text into tmux session. Returns True on success.
+
+    Short text uses ``send-keys -l`` directly.  Long text (> SEND_KEYS_MAX_BYTES)
+    is written to a temp file and pasted via ``load-buffer`` + ``paste-buffer``,
+    which bypasses tmux's send-keys argument length limit.
 
     A short delay between text and Enter prevents the TUI from dropping
     the Enter key when still processing a large or multi-line paste.
     """
+    if len(text.encode("utf-8")) > SEND_KEYS_MAX_BYTES:
+        return _inject_text_via_buffer(session, text)
+    return _inject_text_via_sendkeys(session, text)
+
+
+def _inject_text_via_sendkeys(session: str, text: str) -> bool:
+    """Inject short text via tmux send-keys."""
     try:
         r1 = subprocess.run(
             ["tmux", "send-keys", "-t", session, "-l", text],
@@ -91,20 +110,69 @@ def _inject_text(session: str, text: str) -> bool:
             log.error("send-keys text failed (rc=%d): %s", r1.returncode,
                        r1.stderr.decode(errors="replace").strip())
             return False
-        # Give the TUI time to process the pasted text before sending Enter.
         time.sleep(0.15)
+        return _send_enter(session)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        log.error("send-keys failed: %s", e)
+        return False
+
+
+def _inject_text_via_buffer(session: str, text: str) -> bool:
+    """Inject long text via tmux load-buffer + paste-buffer."""
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix="ccmux_inject_", suffix=".txt")
+        os.write(fd, text.encode("utf-8"))
+        os.close(fd)
+
+        r1 = subprocess.run(
+            ["tmux", "load-buffer", tmp_path],
+            capture_output=True,
+            timeout=SEND_KEYS_TIMEOUT,
+        )
+        if r1.returncode != 0:
+            log.error("load-buffer failed (rc=%d): %s", r1.returncode,
+                       r1.stderr.decode(errors="replace").strip())
+            return False
+
         r2 = subprocess.run(
-            ["tmux", "send-keys", "-t", session, "Enter"],
+            ["tmux", "paste-buffer", "-t", session],
             capture_output=True,
             timeout=SEND_KEYS_TIMEOUT,
         )
         if r2.returncode != 0:
-            log.error("send-keys Enter failed (rc=%d): %s", r2.returncode,
+            log.error("paste-buffer failed (rc=%d): %s", r2.returncode,
                        r2.stderr.decode(errors="replace").strip())
+            return False
+
+        time.sleep(0.15)
+        return _send_enter(session)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        log.error("buffer inject failed: %s", e)
+        return False
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _send_enter(session: str) -> bool:
+    """Send Enter key to tmux session."""
+    try:
+        r = subprocess.run(
+            ["tmux", "send-keys", "-t", session, "Enter"],
+            capture_output=True,
+            timeout=SEND_KEYS_TIMEOUT,
+        )
+        if r.returncode != 0:
+            log.error("send-keys Enter failed (rc=%d): %s", r.returncode,
+                       r.stderr.decode(errors="replace").strip())
             return False
         return True
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        log.error("send-keys failed: %s", e)
+        log.error("send-keys Enter failed: %s", e)
         return False
 
 
@@ -166,6 +234,7 @@ class Injector:
         self._queue: list[str] = []
         self._running = True
         self._start_time = time.monotonic()
+        self._inject_failures = 0  # Consecutive injection failure count
 
     def stop(self) -> None:
         self._running = False
@@ -216,11 +285,26 @@ class Injector:
                     text = "\n---\n".join(self._queue)
                     if _inject_text(self.tmux_session, text):
                         log.info(
-                            "Injected %d message(s) into %s",
+                            "Injected %d message(s) (%d bytes) into %s",
                             len(self._queue),
+                            len(text.encode("utf-8")),
                             self.tmux_session,
                         )
                         self._queue.clear()
+                        self._inject_failures = 0
+                    else:
+                        self._inject_failures += 1
+                        if self._inject_failures >= MAX_INJECT_RETRIES:
+                            log.error(
+                                "Dropping %d message(s) after %d injection "
+                                "failures in %s (total %d bytes)",
+                                len(self._queue),
+                                self._inject_failures,
+                                self.tmux_session,
+                                len(text.encode("utf-8")),
+                            )
+                            self._queue.clear()
+                            self._inject_failures = 0
 
                 await asyncio.sleep(POLL_INTERVAL)
         finally:
