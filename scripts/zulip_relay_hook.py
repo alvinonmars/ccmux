@@ -9,6 +9,8 @@ Stdlib only — no venv dependencies.
 Environment: ZULIP_STREAM, ZULIP_TOPIC, ZULIP_SITE, ZULIP_BOT_EMAIL,
              ZULIP_BOT_API_KEY_FILE, ZULIP_PROJECT_PATH
 """
+from __future__ import annotations
+
 import base64
 import json
 import os
