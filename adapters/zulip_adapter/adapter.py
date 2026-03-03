@@ -37,6 +37,11 @@ INITIAL_BACKOFF = 1.0
 MAX_BACKOFF = 60.0
 POLL_TIMEOUT = 90  # seconds for long-poll (Zulip default)
 
+# Staleness watchdog: if no events (including heartbeats) arrive within this
+# many seconds, force re-registration.  Zulip sends heartbeat events every
+# ~POLL_TIMEOUT seconds during quiet periods, so 3× is a generous threshold.
+STALE_QUEUE_TIMEOUT = POLL_TIMEOUT * 3  # 270 s
+
 
 def _load_api_key(credentials_path: Path) -> str:
     """Read ZULIP_BOT_API_KEY from the credentials file."""
@@ -360,7 +365,13 @@ class ZulipAdapter:
         )
 
     async def run(self) -> None:
-        """Main event loop: register queue, long-poll, route messages."""
+        """Main event loop: register queue, long-poll, route messages.
+
+        Includes a staleness watchdog: if no events (including heartbeats)
+        arrive within ``STALE_QUEUE_TIMEOUT`` seconds, the queue is assumed
+        dead and re-registered.  This catches silent connection deaths that
+        do not raise exceptions (e.g. TCP half-open, server-side GC).
+        """
         backoff = INITIAL_BACKOFF
         self._queue_id: str | None = None
 
@@ -373,11 +384,15 @@ class ZulipAdapter:
                 self._queue_id = queue_id
                 log.info("Event queue registered: %s", queue_id)
                 backoff = INITIAL_BACKOFF  # Reset on success
+                last_event_time = time.monotonic()
 
                 while self._running:
                     events = await asyncio.get_running_loop().run_in_executor(
                         None, self._get_events, queue_id, last_event_id
                     )
+
+                    if events:
+                        last_event_time = time.monotonic()
 
                     for event in events:
                         last_event_id = max(
@@ -385,6 +400,17 @@ class ZulipAdapter:
                         )
                         if event.get("type") == "message":
                             await self._handle_message(event)
+
+                    # Staleness watchdog: force re-registration if no events
+                    # (including Zulip heartbeats) for too long.
+                    elapsed = time.monotonic() - last_event_time
+                    if elapsed > STALE_QUEUE_TIMEOUT:
+                        log.warning(
+                            "Event queue stale (no events for %.0fs > %.0fs "
+                            "threshold), forcing re-registration",
+                            elapsed, STALE_QUEUE_TIMEOUT,
+                        )
+                        break  # Break inner loop → re-register in outer loop
 
             except ConnectionError as e:
                 log.warning("Connection error: %s (retry in %.0fs)", e, backoff)

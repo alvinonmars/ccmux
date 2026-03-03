@@ -1488,6 +1488,167 @@ class TestReviewFixes:
 
 
 # ============================================================================
+# Event queue staleness watchdog
+# ============================================================================
+
+
+class TestStaleQueueWatchdog:
+    """Verify the staleness watchdog forces re-registration."""
+
+    def _make_adapter(self, tmp_path: Path) -> "ZulipAdapter":
+        from adapters.zulip_adapter.adapter import ZulipAdapter
+        from adapters.zulip_adapter.config import ZulipAdapterConfig
+
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        streams = tmp_path / "streams"
+        streams.mkdir()
+        env_tpl = tmp_path / "env_template.sh"
+        env_tpl.write_text("# empty\n")
+        cred = tmp_path / "cred.env"
+        cred.write_text("ZULIP_BOT_API_KEY=testkey123\n")
+
+        cfg = ZulipAdapterConfig(
+            site="https://zulip.example.com",
+            bot_email="bot@example.com",
+            bot_credentials=cred,
+            streams_dir=streams,
+            env_template=env_tpl,
+            runtime_dir=runtime,
+        )
+        return ZulipAdapter(cfg)
+
+    def test_stale_queue_triggers_reregistration(self, tmp_path: Path) -> None:
+        """When no events arrive beyond STALE_QUEUE_TIMEOUT, run() re-registers."""
+        import adapters.zulip_adapter.adapter as adapter_mod
+
+        adapter = self._make_adapter(tmp_path)
+
+        register_count = 0
+        original_stale_timeout = adapter_mod.STALE_QUEUE_TIMEOUT
+
+        def fake_register():
+            nonlocal register_count
+            register_count += 1
+            if register_count >= 3:
+                adapter._running = False
+            return (f"queue-{register_count}", -1)
+
+        # Return empty events (simulating a stale queue with no heartbeats)
+        def fake_get_events(queue_id, last_event_id):
+            return []
+
+        # Use a tiny stale timeout so the test runs fast
+        adapter_mod.STALE_QUEUE_TIMEOUT = 0.0
+
+        try:
+            with patch.object(adapter, "_register_event_queue", side_effect=fake_register):
+                with patch.object(adapter, "_get_events", side_effect=fake_get_events):
+                    loop = asyncio.new_event_loop()
+                    try:
+                        loop.run_until_complete(adapter.run())
+                    finally:
+                        loop.close()
+
+            # Should have registered at least 2 times (initial + re-register after stale)
+            assert register_count >= 2, (
+                f"Expected at least 2 registrations due to staleness, got {register_count}"
+            )
+        finally:
+            adapter_mod.STALE_QUEUE_TIMEOUT = original_stale_timeout
+
+    def test_events_reset_staleness_timer(self, tmp_path: Path) -> None:
+        """When events arrive, the staleness timer is reset (no re-registration)."""
+        import adapters.zulip_adapter.adapter as adapter_mod
+
+        adapter = self._make_adapter(tmp_path)
+
+        register_count = 0
+        poll_count = 0
+
+        def fake_register():
+            nonlocal register_count
+            register_count += 1
+            return ("queue-1", -1)
+
+        # Use a fake monotonic clock to control time precisely.
+        # Each poll advances 50 s, but events arrive so the timer resets.
+        # With threshold at 200 s the queue stays fresh as long as events come.
+        fake_clock = [0.0]
+
+        def fake_get_events(queue_id, last_event_id):
+            nonlocal poll_count
+            poll_count += 1
+            fake_clock[0] += 50.0  # 50 s per poll, well under 200 s threshold
+            if poll_count >= 5:
+                adapter._running = False
+                return []
+            # Return a heartbeat event each time — this resets the staleness timer
+            return [{"id": poll_count, "type": "heartbeat"}]
+
+        original_timeout = adapter_mod.STALE_QUEUE_TIMEOUT
+        adapter_mod.STALE_QUEUE_TIMEOUT = 200.0
+
+        try:
+            with patch.object(adapter, "_register_event_queue", side_effect=fake_register):
+                with patch.object(adapter, "_get_events", side_effect=fake_get_events):
+                    with patch("adapters.zulip_adapter.adapter.time") as mock_time:
+                        mock_time.monotonic = lambda: fake_clock[0]
+                        loop = asyncio.new_event_loop()
+                        try:
+                            loop.run_until_complete(adapter.run())
+                        finally:
+                            loop.close()
+
+            # Only 1 registration — heartbeats kept the queue alive
+            assert register_count == 1, (
+                f"Expected exactly 1 registration (heartbeats reset timer), got {register_count}"
+            )
+        finally:
+            adapter_mod.STALE_QUEUE_TIMEOUT = original_timeout
+
+    def test_stale_queue_log_message(self, tmp_path: Path) -> None:
+        """Staleness watchdog logs a warning before re-registering."""
+        import adapters.zulip_adapter.adapter as adapter_mod
+
+        adapter = self._make_adapter(tmp_path)
+        register_count = 0
+
+        def fake_register():
+            nonlocal register_count
+            register_count += 1
+            if register_count >= 2:
+                adapter._running = False
+            return (f"queue-{register_count}", -1)
+
+        def fake_get_events(queue_id, last_event_id):
+            return []
+
+        adapter_mod.STALE_QUEUE_TIMEOUT = 0.0
+
+        try:
+            with patch.object(adapter, "_register_event_queue", side_effect=fake_register):
+                with patch.object(adapter, "_get_events", side_effect=fake_get_events):
+                    with patch.object(adapter_mod.log, "warning") as mock_warn:
+                        loop = asyncio.new_event_loop()
+                        try:
+                            loop.run_until_complete(adapter.run())
+                        finally:
+                            loop.close()
+
+                        # Check that at least one warning about staleness was logged
+                        stale_warnings = [
+                            c for c in mock_warn.call_args_list
+                            if "stale" in str(c).lower()
+                        ]
+                        assert len(stale_warnings) >= 1, (
+                            f"Expected staleness warning, got: {mock_warn.call_args_list}"
+                        )
+        finally:
+            adapter_mod.STALE_QUEUE_TIMEOUT = adapter_mod.POLL_TIMEOUT * 3
+
+
+# ============================================================================
 # Closed-loop scenario tests
 #
 # These tests use REAL files, FIFOs, and config loading where possible.

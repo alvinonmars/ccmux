@@ -1,0 +1,103 @@
+digraph dataflow {
+    rankdir=LR;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10, style="filled", margin="0.15,0.08"];
+    edge [fontname="Helvetica", fontsize=9];
+    splines=true;
+
+    // Title
+    labelloc="t";
+    label="ccmux — Message Data Flow";
+    fontsize=16;
+    fontcolor="#333333";
+
+    // === INBOUND (WhatsApp / Timer path through core daemon) ===
+    subgraph cluster_inbound_core {
+        label="Inbound — Core Daemon Path";
+        style="filled";
+        fillcolor="#E8F5E9";
+        color="#4CAF50";
+        fontcolor="#2E7D32";
+
+        wa_msg [label="WhatsApp\nMessage", shape="note", fillcolor="#25D366", fontcolor="white"];
+        timer_event [label="Timer\nEvent", shape="note", fillcolor="#FF9800", fontcolor="white"];
+
+        wa_classify [label="wa-notifier\nClassify & Format\n→ JSON", shape="box", fillcolor="#C8E6C9"];
+        timer_exec [label="Timer Script\nGenerate Payload", shape="box", fillcolor="#C8E6C9"];
+
+        fifo_in [label="Named FIFO\nin.whatsapp / in.butler", shape="parallelogram", fillcolor="#A5D6A7"];
+        daemon_queue [label="Daemon\nMessage Queue", shape="box", fillcolor="#81C784"];
+        idle_gate [label="Idle Gate\n(30s threshold\n+ silence detect)", shape="diamond", fillcolor="#66BB6A", fontcolor="white"];
+        send_keys [label="tmux send-keys\n[HH:MM channel] content", shape="box", fillcolor="#4CAF50", fontcolor="white"];
+    }
+
+    // === INBOUND (Zulip path — independent) ===
+    subgraph cluster_inbound_zulip {
+        label="Inbound — Zulip Adapter Path";
+        style="filled";
+        fillcolor="#EDE7F6";
+        color="#673AB7";
+        fontcolor="#4527A0";
+
+        z_event [label="Zulip\nStream Message", shape="note", fillcolor="#6492FE", fontcolor="white"];
+        z_route [label="Adapter\nRoute by\nstream+topic", shape="box", fillcolor="#D1C4E9"];
+        z_attach [label="Download\nAttachments\n(if any)", shape="box", fillcolor="#D1C4E9"];
+        z_format [label="Format\n[YY/MM/DD HH:MM\nFrom zulip] content", shape="box", fillcolor="#D1C4E9"];
+        z_fifo [label="Per-Topic FIFO\nin.zulip", shape="parallelogram", fillcolor="#B39DDB"];
+        z_gate [label="Injection Gate\n(❯ prompt detect\n+ idle check)", shape="diamond", fillcolor="#9575CD", fontcolor="white"];
+        z_inject [label="tmux send-keys\n(batch with \\n---\\n)", shape="box", fillcolor="#7E57C2", fontcolor="white"];
+    }
+
+    // === CLAUDE ===
+    claude [label="Claude Code\n(Opus / Sonnet)\nProcess & Respond", shape="doubleoctagon", fillcolor="#FF8A65", fontcolor="white", width=2, height=1];
+
+    // === OUTBOUND ===
+    subgraph cluster_outbound {
+        label="Outbound — Response Delivery";
+        style="filled";
+        fillcolor="#FFF3E0";
+        color="#FF9800";
+        fontcolor="#E65100";
+
+        stop_hook [label="Stop Hook\nCapture last_assistant_message\nfrom stdin JSON", shape="box", fillcolor="#FFE0B2"];
+        output_sock [label="output.sock\n(broadcast to\nall subscribers)", shape="parallelogram", fillcolor="#FFCC80"];
+        relay_hook [label="zulip_relay_hook.py\nProcess [send-file:]\nChunk long messages", shape="box", fillcolor="#FFB74D"];
+        mcp_tool [label="send_to_channel()\nMCP tool → out.* FIFO", shape="box", fillcolor="#FFE0B2"];
+    }
+
+    // === DESTINATIONS ===
+    wa_out [label="WhatsApp\nReply", shape="note", fillcolor="#25D366", fontcolor="white"];
+    z_out [label="Zulip\nTopic Reply", shape="note", fillcolor="#6492FE", fontcolor="white"];
+    admin_notify [label="Admin\nNotification", shape="note", fillcolor="#607D8B", fontcolor="white"];
+
+    // === EDGES: Core Inbound ===
+    wa_msg -> wa_classify;
+    timer_event -> timer_exec;
+    wa_classify -> fifo_in;
+    timer_exec -> fifo_in;
+    fifo_in -> daemon_queue;
+    daemon_queue -> idle_gate;
+    idle_gate -> send_keys [label="idle"];
+    idle_gate -> daemon_queue [label="busy\n(wait)", style="dashed", constraint=false];
+    send_keys -> claude;
+
+    // === EDGES: Zulip Inbound ===
+    z_event -> z_route;
+    z_route -> z_attach;
+    z_attach -> z_format;
+    z_format -> z_fifo [label="NUL \\0"];
+    z_fifo -> z_gate;
+    z_gate -> z_inject [label="❯ visible"];
+    z_gate -> z_fifo [label="wait\n(poll)", style="dashed", constraint=false];
+    z_inject -> claude;
+
+    // === EDGES: Outbound ===
+    claude -> stop_hook [label="turn complete"];
+    claude -> mcp_tool [label="MCP call", style="dashed"];
+    stop_hook -> output_sock [label="core daemon"];
+    stop_hook -> relay_hook [label="Zulip instance\n(ZULIP_STREAM set)"];
+    relay_hook -> z_out [label="POST /messages"];
+    output_sock -> wa_out [label="via wa MCP"];
+    mcp_tool -> wa_out [label="send_message()"];
+    mcp_tool -> admin_notify [label="send_to_channel()"];
+}

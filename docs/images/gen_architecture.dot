@@ -1,0 +1,123 @@
+digraph architecture {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, style="filled", shape="box", margin="0.2,0.1"];
+    edge [fontname="Helvetica", fontsize=9];
+    compound=true;
+    newrank=true;
+    splines=true;
+
+    // Title
+    labelloc="t";
+    label="ccmux — System Architecture";
+    fontsize=16;
+    fontcolor="#333333";
+
+    // --- External Sources ---
+    subgraph cluster_sources {
+        label="External Input Sources";
+        style="dashed";
+        color="#999999";
+        fontcolor="#666666";
+
+        whatsapp [label="WhatsApp\n(whatsapp-bridge)", fillcolor="#25D366", fontcolor="white", shape="ellipse"];
+        zulip_server [label="Zulip Server\n(self-hosted)", fillcolor="#6492FE", fontcolor="white", shape="ellipse"];
+        timers [label="systemd Timers\n(ccmux.toml)", fillcolor="#FF9800", fontcolor="white", shape="ellipse"];
+        terminal [label="Human Terminal\n(tmux attach)", fillcolor="#607D8B", fontcolor="white", shape="ellipse"];
+    }
+
+    // --- Layer 3: Adapters ---
+    subgraph cluster_adapters {
+        label="Layer 3 — Input Adapters";
+        style="filled";
+        fillcolor="#E8F5E9";
+        color="#4CAF50";
+        fontcolor="#2E7D32";
+
+        wa_notifier [label="wa-notifier\n(polls SQLite DB)", fillcolor="#C8E6C9"];
+        zulip_adapter [label="Zulip Adapter\n(event queue long-poll)", fillcolor="#C8E6C9"];
+        timer_scripts [label="Timer Scripts\n(daily_butler, etc.)", fillcolor="#C8E6C9"];
+    }
+
+    // --- Layer 2: Core ---
+    subgraph cluster_core {
+        label="Layer 2 — ccmux Core Daemon";
+        style="filled";
+        fillcolor="#E3F2FD";
+        color="#2196F3";
+        fontcolor="#1565C0";
+
+        fifo_mgr [label="FIFO Manager\n(inotify auto-discover)", fillcolor="#BBDEFB"];
+        injector_core [label="Injection Engine\n(idle detection + gate)", fillcolor="#BBDEFB"];
+        output_hub [label="Output Hub\n(stop hook → output.sock)", fillcolor="#BBDEFB"];
+        lifecycle [label="LifecycleManager\n(crash → auto-restart)", fillcolor="#BBDEFB"];
+        mcp_server [label="MCP SSE Server\n(send_to_channel tool)", fillcolor="#BBDEFB"];
+    }
+
+    // --- Layer 1: Runtime ---
+    subgraph cluster_runtime {
+        label="Layer 1 — tmux Session";
+        style="filled";
+        fillcolor="#FFF3E0";
+        color="#FF9800";
+        fontcolor="#E65100";
+
+        tmux_session [label="tmux pane\n(persistent shell)", fillcolor="#FFE0B2"];
+        claude [label="Claude Code\n(Opus/Sonnet)", fillcolor="#FF8A65", fontcolor="white", shape="doubleoctagon"];
+    }
+
+    // --- Zulip Adapter Detail ---
+    subgraph cluster_zulip_detail {
+        label="Zulip Adapter — Per-Topic Instances";
+        style="filled";
+        fillcolor="#EDE7F6";
+        color="#673AB7";
+        fontcolor="#4527A0";
+
+        process_mgr [label="ProcessManager\n(lazy create / resume)", fillcolor="#D1C4E9"];
+
+        subgraph cluster_instance {
+            label="Instance (stream+topic)";
+            style="filled";
+            fillcolor="#F3E5F5";
+            color="#9C27B0";
+
+            z_fifo [label="FIFO\n(in.zulip)", fillcolor="#E1BEE7"];
+            z_injector [label="Injector\n(gate + send-keys)", fillcolor="#E1BEE7"];
+            z_tmux [label="tmux session\n(Claude Code)", fillcolor="#CE93D8"];
+        }
+
+        relay_hook [label="zulip_relay_hook.py\n(Stop hook → Zulip API)", fillcolor="#D1C4E9"];
+    }
+
+    // --- Connections ---
+    // External → Adapters
+    whatsapp -> wa_notifier [label="SQLite DB poll"];
+    zulip_server -> zulip_adapter [label="event queue"];
+    timers -> timer_scripts [label="OnCalendar"];
+    terminal -> tmux_session [label="tmux attach", style="dashed"];
+
+    // Adapters → Core (FIFO path)
+    wa_notifier -> fifo_mgr [label="in.whatsapp"];
+    timer_scripts -> fifo_mgr [label="in.butler / in.*"];
+
+    // Core internal
+    fifo_mgr -> injector_core [label="message queue"];
+    injector_core -> tmux_session [label="tmux send-keys"];
+    claude -> output_hub [label="stop hook JSON", style="dashed", dir="back"];
+    lifecycle -> claude [label="monitor PID", style="dotted"];
+    mcp_server -> claude [label=".mcp.json", style="dotted"];
+
+    // Zulip path (separate from core daemon)
+    zulip_adapter -> process_mgr [label="ensure_instance()"];
+    process_mgr -> z_fifo [label="create"];
+    process_mgr -> z_injector [label="start task"];
+    process_mgr -> z_tmux [label="tmux new-session"];
+    zulip_adapter -> z_fifo [label="write message\\n(NUL-delimited)"];
+    z_injector -> z_tmux [label="tmux send-keys\\n(wait for ❯)"];
+    z_tmux -> relay_hook [label="Stop hook"];
+    relay_hook -> zulip_server [label="POST /messages", style="dashed"];
+
+    // Output path
+    output_hub -> wa_notifier [label="output.sock", style="dashed", constraint=false];
+}

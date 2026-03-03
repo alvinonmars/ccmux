@@ -67,7 +67,32 @@ There's also a practical reason: the Anthropic API is expensive. Claude Code wit
 
 The goal: let Claude Code run natively (no API shim, no prompt wrapper, no capability loss) while gaining 24/7 heartbeat capability — always on, accepting input from any channel, surviving reboots, and auto-recovering from crashes. A persistent AI agent that uses the full Claude Code experience as its runtime.
 
-## How It Works
+## Architecture
+
+### System Architecture
+
+![System Architecture](docs/images/gen_architecture.png)
+
+The system is organized in three layers:
+
+- **Layer 1 (tmux Session)**: Persistent shell hosting Claude Code — the actual AI runtime
+- **Layer 2 (Core Daemon)**: FIFO manager, injection engine, output hub, lifecycle manager, MCP server
+- **Layer 3 (Input Adapters)**: wa-notifier (WhatsApp), timer scripts, Zulip adapter
+
+The **Zulip adapter** runs as a separate process managing per-topic instances. Each topic gets its own tmux session, FIFO, and injector — fully isolated from the core daemon path.
+
+### Message Data Flow
+
+![Message Data Flow](docs/images/gen_dataflow.png)
+
+Two independent inbound paths:
+
+- **Core daemon path**: WhatsApp/timer messages → named FIFO → daemon queue → idle gate → `tmux send-keys` → Claude
+- **Zulip adapter path**: Zulip stream events → route by topic → per-topic FIFO → injection gate (❯ prompt detect) → `tmux send-keys` → Claude
+
+Outbound: Claude's response → stop hook → either `output.sock` (core daemon) or `zulip_relay_hook.py` (Zulip instances) → destination.
+
+### How It Works
 
 ```
 Adapters (Layer 3)                   ccmux daemon (Layer 2)
@@ -578,7 +603,7 @@ This gives you the native Claude Code experience. Your keyboard activity suppres
 .venv/bin/python -m pytest tests/ -m real_claude -v
 ```
 
-See `docs/spec.md` for architecture details and `docs/acceptance-criteria.md` for test coverage.
+See `docs/spec.md` for architecture details and `docs/acceptance-criteria.md` for test coverage. Architecture diagrams are generated from Graphviz source in `docs/images/gen_*.dot`.
 
 ## Disclaimer
 
