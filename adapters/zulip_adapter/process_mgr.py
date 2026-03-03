@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import enum
 import hashlib
 import json
 import logging
@@ -22,6 +23,7 @@ import os
 import re
 import signal
 import subprocess
+import uuid
 from pathlib import Path
 
 from .config import StreamConfig, ZulipAdapterConfig
@@ -34,6 +36,66 @@ PYTHON = Path(__file__).resolve().parent.parent.parent / ".venv" / "bin" / "pyth
 
 # Characters safe for tmux session names and directory names
 _UNSAFE_CHARS_RE = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+class CreateMode(enum.Enum):
+    """Result of instance creation/resumption."""
+
+    NONE = "none"              # Instance already alive, no action taken
+    FIRST_TIME = "first_time"  # Brand new instance, no prior session
+    RESUMED = "resumed"        # Resumed from existing session JSONL
+    FALLBACK = "fallback"      # Session JSONL missing, fresh start with history
+
+
+def _read_instance_toml(path: Path) -> dict:
+    """Parse instance.toml and return key-value dict.
+
+    Returns empty dict on any parse error (corrupt file, missing file).
+    """
+    if not path.exists():
+        return {}
+    try:
+        import sys
+        if sys.version_info >= (3, 11):
+            import tomllib
+        else:
+            try:
+                import tomllib  # type: ignore[import]
+            except ModuleNotFoundError:
+                import tomli as tomllib  # type: ignore[no-redef]
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except Exception:
+        log.warning("Failed to parse instance.toml: %s", path)
+        return {}
+
+
+def _write_instance_toml(path: Path, data: dict) -> None:
+    """Write instance.toml as simple key = value pairs."""
+    lines = []
+    for k, v in data.items():
+        if isinstance(v, str):
+            lines.append(f'{k} = "{v}"')
+        else:
+            lines.append(f"{k} = {v}")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _claude_session_dir(project_path: Path) -> Path:
+    """Derive Claude Code's session storage directory for a project.
+
+    Claude Code stores sessions at ~/.claude/projects/<hashed-path>/
+    where <hashed-path> is the absolute project path with '/' replaced by '-'.
+    """
+    abs_path = str(project_path.resolve())
+    hashed = abs_path.replace("/", "-")
+    return Path.home() / ".claude" / "projects" / hashed
+
+
+def _session_jsonl_exists(session_id: str, project_path: Path) -> bool:
+    """Check if a Claude Code session JSONL file exists."""
+    session_dir = _claude_session_dir(project_path)
+    return (session_dir / f"{session_id}.jsonl").exists()
 
 
 def _sanitize_name(name: str) -> str:
@@ -185,11 +247,11 @@ class ProcessManager:
 
     async def ensure_instance(
         self, stream: str, topic: str, stream_cfg: StreamConfig
-    ) -> tuple[Path, bool]:
+    ) -> tuple[Path, CreateMode]:
         """Ensure instance is running. Lazy creates if needed.
 
-        Returns (fifo_path, created) where created is True if a new instance
-        was spawned (so the caller can send a "Session started" notification).
+        Returns (fifo_path, create_mode) where create_mode indicates what
+        happened (NONE if already alive, or FIRST_TIME/RESUMED/FALLBACK).
         """
         fifo = _fifo_path(self.cfg, stream, topic)
         key = f"{stream}/{topic}"
@@ -201,7 +263,7 @@ class ProcessManager:
         )
 
         if self.is_alive(stream, topic) and fifo.exists() and not injector_dead:
-            return fifo, False
+            return fifo, CreateMode.NONE
 
         # Fallback: injector task running + tmux alive = instance is OK
         # (covers case where PID file write failed in _lazy_create step 7)
@@ -212,24 +274,24 @@ class ProcessManager:
             and _tmux_has_session(_tmux_session_name(stream, topic))
         ):
             log.debug("PID file missing but injector+tmux alive for %s", key)
-            return fifo, False
+            return fifo, CreateMode.NONE
 
         if injector_dead:
             log.warning("Injector task died for %s, recreating instance", key)
 
         result = await self._lazy_create(stream, topic, stream_cfg)
         if result is None:
-            # tmux creation failed — return FIFO path but not "created"
-            # so caller doesn't send a false "Session started" notification
-            return fifo, False
-        return result, True
+            # tmux creation failed — return FIFO path but CreateMode.NONE
+            # so caller doesn't send a false notification
+            return fifo, CreateMode.NONE
+        return result
 
     async def _lazy_create(
         self, stream: str, topic: str, stream_cfg: StreamConfig
-    ) -> Path | None:
+    ) -> tuple[Path, CreateMode] | None:
         """Create a new instance: instance.toml, dirs, FIFO, tmux, injector, PID.
 
-        Returns FIFO path on success, None on failure (e.g. tmux creation failed).
+        Returns (fifo_path, create_mode) on success, None on failure.
         """
         session = _tmux_session_name(stream, topic)
         runtime = _runtime_dir(self.cfg, stream, topic)
@@ -245,10 +307,34 @@ class ProcessManager:
         instance_dir = self.cfg.streams_dir / _sanitize_name(stream) / _sanitize_name(topic)
         instance_dir.mkdir(parents=True, exist_ok=True)
         instance_toml = instance_dir / "instance.toml"
-        if not instance_toml.exists():
-            instance_toml.write_text(
-                f'created_at = "{datetime.datetime.now().astimezone().isoformat()}"\n'
+
+        # Determine session mode: resume, fallback, or first-time
+        toml_data = _read_instance_toml(instance_toml)
+        existing_session_id = toml_data.get("session_id", "")
+
+        if existing_session_id and _session_jsonl_exists(
+            existing_session_id, stream_cfg.project_path
+        ):
+            create_mode = CreateMode.RESUMED
+            session_id = existing_session_id
+            log.info("Resuming session %s for %s/%s", session_id, stream, topic)
+        elif existing_session_id:
+            create_mode = CreateMode.FALLBACK
+            session_id = str(uuid.uuid4())
+            log.info(
+                "Session JSONL missing for %s, fallback with new session %s",
+                existing_session_id, session_id,
             )
+        else:
+            create_mode = CreateMode.FIRST_TIME
+            session_id = str(uuid.uuid4())
+            log.info("First-time session %s for %s/%s", session_id, stream, topic)
+
+        # Write/update instance.toml with session_id
+        toml_data["session_id"] = session_id
+        if "created_at" not in toml_data:
+            toml_data["created_at"] = datetime.datetime.now().astimezone().isoformat()
+        _write_instance_toml(instance_toml, toml_data)
 
         # 2. Create runtime directory + FIFO
         runtime.mkdir(parents=True, exist_ok=True)
@@ -305,6 +391,7 @@ class ProcessManager:
         env_vars["ZULIP_STREAM"] = stream
         env_vars["ZULIP_TOPIC"] = topic
         env_vars["ZULIP_PROJECT_PATH"] = str(project_path)
+        env_vars["ZULIP_SESSION_ID"] = session_id
 
         # 5. Kill old tmux session if it exists (lazy create guard)
         if _tmux_has_session(session):
@@ -337,11 +424,14 @@ class ProcessManager:
             self._close_sentinel(key)
             return None
 
-        # 6b. Send claude command via send-keys
+        # 6b. Send claude command via send-keys (resume or new session)
+        if create_mode == CreateMode.RESUMED:
+            claude_cmd = f"claude --resume {session_id} --dangerously-skip-permissions"
+        else:
+            claude_cmd = f"claude --session-id {session_id} --dangerously-skip-permissions"
         try:
             subprocess.run(
-                ["tmux", "send-keys", "-t", session,
-                 "claude --dangerously-skip-permissions", "Enter"],
+                ["tmux", "send-keys", "-t", session, claude_cmd, "Enter"],
                 capture_output=True,
                 timeout=5,
             )
@@ -382,8 +472,8 @@ class ProcessManager:
             injector.run(), name=f"injector-{key}"
         )
 
-        log.info("Instance ready: stream=%s topic=%s", stream, topic)
-        return fifo
+        log.info("Instance ready: stream=%s topic=%s mode=%s", stream, topic, create_mode.value)
+        return fifo, create_mode
 
     def _close_sentinel(self, key: str) -> None:
         """Close and remove sentinel fd for a key."""

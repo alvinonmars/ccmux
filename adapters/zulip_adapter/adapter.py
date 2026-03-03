@@ -28,7 +28,7 @@ from .file_handler import (
     sanitize_filename,
     strip_attachment_links,
 )
-from .process_mgr import ProcessManager
+from .process_mgr import CreateMode, ProcessManager
 
 log = logging.getLogger(__name__)
 
@@ -165,6 +165,54 @@ class ZulipAdapter:
                 stream, topic, result.get("msg", "unknown"),
             )
 
+    def _fetch_topic_history(
+        self, stream: str, topic: str, limit: int = 20
+    ) -> list[dict]:
+        """Fetch recent message history for a topic from Zulip API.
+
+        Returns list of message dicts (newest last), excluding bot's own messages.
+        Returns empty list on API failure.
+        """
+        narrow = json.dumps([
+            ["stream", stream],
+            ["topic", topic],
+        ])
+        params = urllib.parse.urlencode({
+            "narrow": narrow,
+            "num_before": limit,
+            "num_after": 0,
+            "anchor": "newest",
+            "apply_markdown": "false",
+        })
+        result = self._api_call("GET", f"/messages?{params}")
+
+        if result.get("result") != "success":
+            log.warning(
+                "Failed to fetch topic history for %s/%s: %s",
+                stream, topic, result.get("msg", "unknown"),
+            )
+            return []
+
+        messages = result.get("messages", [])
+        # Filter out bot's own messages and reverse to chronological order
+        filtered = [
+            m for m in messages
+            if m.get("sender_email") != self.cfg.bot_email
+        ]
+        return filtered
+
+    def _format_history_context(self, history: list[dict]) -> str:
+        """Format message history as a context recovery prompt."""
+        lines = ["[Context recovery] Previous conversation in this topic:"]
+        for msg in history:
+            sender = msg.get("sender_full_name", "unknown")
+            ts = msg.get("timestamp", 0)
+            dt = datetime.fromtimestamp(ts).strftime("%H:%M") if ts else "??:??"
+            content = msg.get("content", "")
+            lines.append(f"  [{dt}] {sender}: {content}")
+        lines.append("[End of context recovery — continue from here]")
+        return "\n".join(lines)
+
     def _write_to_fifo(self, fifo_path: Path, message: str) -> bool:
         """Write message to FIFO. Returns True on success.
 
@@ -225,11 +273,31 @@ class ZulipAdapter:
         stream_cfg = self.cfg.streams[stream]
 
         # Ensure instance is alive (lazy create if needed)
-        fifo, created = await self.process_mgr.ensure_instance(stream, topic, stream_cfg)
+        fifo, create_mode = await self.process_mgr.ensure_instance(stream, topic, stream_cfg)
 
-        if created:
-            # Notify in Zulip that a new session started
+        if create_mode == CreateMode.FIRST_TIME:
             self._post_message(stream, topic, "\U0001f916 Session started.")
+        elif create_mode == CreateMode.RESUMED:
+            self._post_message(
+                stream, topic,
+                "\U0001f916 Session resumed (previous context restored).",
+            )
+        elif create_mode == CreateMode.FALLBACK:
+            self._post_message(
+                stream, topic,
+                "\U0001f916 Session restarted. Recovering context from history...",
+            )
+            history = self._fetch_topic_history(stream, topic)
+            if history:
+                context = self._format_history_context(history)
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, self._write_to_fifo, fifo, context
+                )
+                self._post_message(
+                    stream, topic,
+                    f"\U0001f916 Recovered {len(history)} message(s).",
+                )
 
         # Handle file attachments: download to project dir, build notifications
         file_notifications: list[str] = []

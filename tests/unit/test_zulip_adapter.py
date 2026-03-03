@@ -18,6 +18,8 @@ from unittest.mock import MagicMock, patch, mock_open
 
 import pytest
 
+from adapters.zulip_adapter.process_mgr import CreateMode
+
 
 # ============================================================================
 # AC-1: ccmux-init (scripts/ccmux_init.py)
@@ -1232,7 +1234,7 @@ class TestReviewFixes:
         # is_alive returns True (PID alive), but injector task is done
         # ensure_instance should detect the dead injector and trigger lazy create
         with patch.object(mgr, "is_alive", return_value=True), \
-             patch.object(mgr, "_lazy_create", return_value=fifo) as mock_create:
+             patch.object(mgr, "_lazy_create", return_value=(fifo, CreateMode.FIRST_TIME)) as mock_create:
             from adapters.zulip_adapter.config import StreamConfig
             sc = StreamConfig(name="stream", project_path=Path("/tmp"))
             loop.run_until_complete(mgr.ensure_instance("stream", "topic", sc))
@@ -1275,12 +1277,12 @@ class TestReviewFixes:
         try:
             with patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=True), \
                  patch.object(mgr, "_lazy_create") as mock_create:
-                result_fifo, created = loop.run_until_complete(
+                result_fifo, create_mode = loop.run_until_complete(
                     mgr.ensure_instance("stream", "topic", sc)
                 )
-                # Fallback path: no recreate, created=False
+                # Fallback path: no recreate, NONE mode
                 mock_create.assert_not_called()
-                assert created is False
+                assert create_mode == CreateMode.NONE
                 assert result_fifo == fifo
         finally:
             future.cancel()
@@ -1609,7 +1611,7 @@ class TestClosedLoopScenarios:
         try:
             # Mock only: tmux has-session (true) and scan_streams (skip mtime check)
             with patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=True), \
-                 patch.object(adapter.process_mgr, "ensure_instance", return_value=(fifo, False)), \
+                 patch.object(adapter.process_mgr, "ensure_instance", return_value=(fifo, CreateMode.NONE)), \
                  patch("adapters.zulip_adapter.adapter.scan_streams"):
 
                 loop = asyncio.new_event_loop()
@@ -1645,7 +1647,7 @@ class TestClosedLoopScenarios:
         event = self._zulip_event("dev-project", "new-topic", "hello world")
 
         try:
-            with patch.object(adapter.process_mgr, "ensure_instance", return_value=(fifo, True)), \
+            with patch.object(adapter.process_mgr, "ensure_instance", return_value=(fifo, CreateMode.FIRST_TIME)), \
                  patch.object(adapter, "_post_message") as mock_post, \
                  patch("adapters.zulip_adapter.adapter.scan_streams"):
 
@@ -1681,7 +1683,7 @@ class TestClosedLoopScenarios:
         event = self._zulip_event("dev-project", "active-topic", "follow-up")
 
         try:
-            with patch.object(adapter.process_mgr, "ensure_instance", return_value=(fifo, False)), \
+            with patch.object(adapter.process_mgr, "ensure_instance", return_value=(fifo, CreateMode.NONE)), \
                  patch.object(adapter, "_post_message") as mock_post, \
                  patch("adapters.zulip_adapter.adapter.scan_streams"):
 
@@ -1754,7 +1756,7 @@ class TestClosedLoopScenarios:
             ]:
                 event = self._zulip_event(stream_name, "topic", msg_text)
                 with patch.object(adapter.process_mgr, "ensure_instance",
-                                  return_value=(fifos[stream_name], False)), \
+                                  return_value=(fifos[stream_name], CreateMode.NONE)), \
                      patch("adapters.zulip_adapter.adapter.scan_streams"):
 
                     loop = asyncio.new_event_loop()
@@ -2309,7 +2311,7 @@ class TestInboundFileHandling:
 
         cms = [
             patch.object(adapter.process_mgr, "ensure_instance",
-                         return_value=(fifo, False)),
+                         return_value=(fifo, CreateMode.NONE)),
             patch.object(adapter, "_write_to_fifo",
                          side_effect=lambda p, m: (written.append(m), True)[-1]),
             patch("adapters.zulip_adapter.adapter.scan_streams"),
@@ -2404,7 +2406,7 @@ class TestInboundFileHandling:
 
         written = []
         with patch.object(adapter.process_mgr, "ensure_instance",
-                          return_value=(fifo, False)), \
+                          return_value=(fifo, CreateMode.NONE)), \
              patch.object(adapter, "_write_to_fifo",
                           side_effect=lambda p, m: (written.append(m), True)[-1]), \
              patch("adapters.zulip_adapter.adapter.scan_streams"), \
@@ -2743,7 +2745,7 @@ class TestFileHandlerClosedLoop:
         }
 
         with patch.object(adapter.process_mgr, "ensure_instance",
-                          return_value=(fifo, False)), \
+                          return_value=(fifo, CreateMode.NONE)), \
              patch.object(adapter, "_write_to_fifo",
                           side_effect=lambda p, m: (written.append(m), True)[-1]), \
              patch.object(adapter._opener, "open", return_value=mock_resp), \
@@ -2812,3 +2814,586 @@ class TestFileHandlerClosedLoop:
 
         # Both resolve to the same path
         assert inbound_dest == outbound_src
+
+
+# ============================================================================
+# Session Resume (process_mgr + adapter integration)
+# ============================================================================
+
+
+class TestSessionResume:
+    """Tests for session resume on restart: CreateMode, instance.toml,
+    session JSONL detection, claude command flags, and user notifications."""
+
+    # -- Helper methods --
+
+    def _make_cfg(self, tmp_path: Path) -> "ZulipAdapterConfig":
+        from adapters.zulip_adapter.config import ZulipAdapterConfig
+
+        cred = tmp_path / "cred.env"
+        cred.write_text("ZULIP_BOT_API_KEY=test\n")
+        streams = tmp_path / "streams"
+        streams.mkdir()
+        env = tmp_path / "env.sh"
+        env.write_text("# empty\n")
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        return ZulipAdapterConfig(
+            site="https://zulip.example.com",
+            bot_email="bot@example.com",
+            bot_credentials=cred,
+            streams_dir=streams,
+            env_template=env,
+            runtime_dir=runtime,
+        )
+
+    def _make_stream_cfg(self, tmp_path: Path) -> "StreamConfig":
+        from adapters.zulip_adapter.config import StreamConfig
+
+        project = tmp_path / "project"
+        project.mkdir(exist_ok=True)
+        return StreamConfig(name="test-stream", project_path=project)
+
+    def _make_adapter(self, tmp_path: Path):
+        from adapters.zulip_adapter.adapter import ZulipAdapter
+
+        cfg = self._make_cfg(tmp_path)
+        cfg.streams = {"test-stream": self._make_stream_cfg(tmp_path)}
+        return ZulipAdapter(cfg)
+
+    def _zulip_event(self, stream, topic, content, sender="user@test.com"):
+        return {
+            "type": "message",
+            "message": {
+                "type": "stream",
+                "display_recipient": stream,
+                "subject": topic,
+                "content": content,
+                "sender_full_name": "User",
+                "sender_email": sender,
+            },
+        }
+
+    # -- _read_instance_toml / _write_instance_toml tests --
+
+    def test_read_instance_toml_corrupt(self, tmp_path: Path) -> None:
+        """Corrupt instance.toml returns empty dict."""
+        from adapters.zulip_adapter.process_mgr import _read_instance_toml
+
+        toml_file = tmp_path / "instance.toml"
+        toml_file.write_text("this is not valid [[[ toml ===")
+        result = _read_instance_toml(toml_file)
+        assert result == {}
+
+    def test_read_instance_toml_missing(self, tmp_path: Path) -> None:
+        """Missing instance.toml returns empty dict."""
+        from adapters.zulip_adapter.process_mgr import _read_instance_toml
+
+        result = _read_instance_toml(tmp_path / "nonexistent.toml")
+        assert result == {}
+
+    def test_write_read_roundtrip(self, tmp_path: Path) -> None:
+        """Data survives write + read."""
+        from adapters.zulip_adapter.process_mgr import (
+            _read_instance_toml,
+            _write_instance_toml,
+        )
+
+        toml_file = tmp_path / "instance.toml"
+        data = {
+            "session_id": "abc-123-def",
+            "created_at": "2026-03-03T09:00:00+08:00",
+        }
+        _write_instance_toml(toml_file, data)
+        result = _read_instance_toml(toml_file)
+        assert result["session_id"] == "abc-123-def"
+        assert result["created_at"] == "2026-03-03T09:00:00+08:00"
+
+    # -- _claude_session_dir / _session_jsonl_exists tests --
+
+    def test_claude_session_dir_path(self, tmp_path: Path) -> None:
+        """Session dir matches Claude Code convention: slashes replaced by dashes."""
+        from adapters.zulip_adapter.process_mgr import _claude_session_dir
+
+        project = Path("/home/user/projects/myapp")
+        result = _claude_session_dir(project)
+        assert result == Path.home() / ".claude" / "projects" / "-home-user-projects-myapp"
+
+    def test_session_jsonl_exists_true(self, tmp_path: Path) -> None:
+        """Returns True when session JSONL file exists."""
+        from adapters.zulip_adapter.process_mgr import _session_jsonl_exists
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        with patch(
+            "adapters.zulip_adapter.process_mgr._claude_session_dir",
+            return_value=tmp_path,
+        ):
+            # Create the JSONL file
+            (tmp_path / "test-session-id.jsonl").write_text("{}")
+            assert _session_jsonl_exists("test-session-id", project) is True
+
+    def test_session_jsonl_exists_false(self, tmp_path: Path) -> None:
+        """Returns False when session JSONL file does not exist."""
+        from adapters.zulip_adapter.process_mgr import _session_jsonl_exists
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        with patch(
+            "adapters.zulip_adapter.process_mgr._claude_session_dir",
+            return_value=tmp_path,
+        ):
+            assert _session_jsonl_exists("nonexistent-id", project) is False
+
+    # -- _lazy_create session mode determination tests --
+
+    def test_first_time_generates_session_id(self, tmp_path: Path) -> None:
+        """New topic with no instance.toml gets a UUID session_id written."""
+        from adapters.zulip_adapter.process_mgr import (
+            ProcessManager,
+            _read_instance_toml,
+            _sanitize_name,
+        )
+
+        cfg = self._make_cfg(tmp_path)
+        sc = self._make_stream_cfg(tmp_path)
+        mgr = ProcessManager(cfg)
+
+        # Mock all subprocess calls to avoid real tmux
+        with patch("adapters.zulip_adapter.process_mgr.subprocess") as mock_sub, \
+             patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=False), \
+             patch("adapters.zulip_adapter.process_mgr._session_jsonl_exists", return_value=False):
+            mock_sub.run.return_value = MagicMock(returncode=0, stdout="12345", stderr=b"")
+            mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+
+            loop = asyncio.new_event_loop()
+            try:
+                result = loop.run_until_complete(
+                    mgr._lazy_create("test-stream", "topic1", sc)
+                )
+            finally:
+                loop.close()
+
+        assert result is not None
+        fifo, mode = result
+        assert mode == CreateMode.FIRST_TIME
+
+        # Verify instance.toml was written with session_id
+        instance_toml = cfg.streams_dir / _sanitize_name("test-stream") / "topic1" / "instance.toml"
+        data = _read_instance_toml(instance_toml)
+        assert "session_id" in data
+        assert len(data["session_id"]) == 36  # UUID format
+
+    def test_resume_with_existing_session(self, tmp_path: Path) -> None:
+        """Existing session_id + JSONL exists → RESUMED mode, uses --resume flag."""
+        from adapters.zulip_adapter.process_mgr import (
+            ProcessManager,
+            _sanitize_name,
+            _write_instance_toml,
+        )
+
+        cfg = self._make_cfg(tmp_path)
+        sc = self._make_stream_cfg(tmp_path)
+        mgr = ProcessManager(cfg)
+
+        # Pre-create instance.toml with session_id
+        instance_dir = cfg.streams_dir / _sanitize_name("test-stream") / "topic1"
+        instance_dir.mkdir(parents=True)
+        _write_instance_toml(
+            instance_dir / "instance.toml",
+            {"session_id": "existing-uuid-1234", "created_at": "2026-03-03T09:00:00+08:00"},
+        )
+
+        with patch("adapters.zulip_adapter.process_mgr.subprocess") as mock_sub, \
+             patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=False), \
+             patch("adapters.zulip_adapter.process_mgr._session_jsonl_exists", return_value=True):
+            mock_sub.run.return_value = MagicMock(returncode=0, stdout="12345", stderr=b"")
+            mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+
+            loop = asyncio.new_event_loop()
+            try:
+                result = loop.run_until_complete(
+                    mgr._lazy_create("test-stream", "topic1", sc)
+                )
+            finally:
+                loop.close()
+
+        assert result is not None
+        fifo, mode = result
+        assert mode == CreateMode.RESUMED
+
+    def test_fallback_when_jsonl_missing(self, tmp_path: Path) -> None:
+        """session_id exists but JSONL is gone → FALLBACK mode, new UUID generated."""
+        from adapters.zulip_adapter.process_mgr import (
+            ProcessManager,
+            _read_instance_toml,
+            _sanitize_name,
+            _write_instance_toml,
+        )
+
+        cfg = self._make_cfg(tmp_path)
+        sc = self._make_stream_cfg(tmp_path)
+        mgr = ProcessManager(cfg)
+
+        # Pre-create instance.toml with session_id
+        instance_dir = cfg.streams_dir / _sanitize_name("test-stream") / "topic1"
+        instance_dir.mkdir(parents=True)
+        _write_instance_toml(
+            instance_dir / "instance.toml",
+            {"session_id": "old-uuid-gone", "created_at": "2026-03-03T09:00:00+08:00"},
+        )
+
+        with patch("adapters.zulip_adapter.process_mgr.subprocess") as mock_sub, \
+             patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=False), \
+             patch("adapters.zulip_adapter.process_mgr._session_jsonl_exists", return_value=False):
+            mock_sub.run.return_value = MagicMock(returncode=0, stdout="12345", stderr=b"")
+            mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+
+            loop = asyncio.new_event_loop()
+            try:
+                result = loop.run_until_complete(
+                    mgr._lazy_create("test-stream", "topic1", sc)
+                )
+            finally:
+                loop.close()
+
+        assert result is not None
+        fifo, mode = result
+        assert mode == CreateMode.FALLBACK
+
+        # Verify new session_id was written (different from old one)
+        data = _read_instance_toml(instance_dir / "instance.toml")
+        assert data["session_id"] != "old-uuid-gone"
+        assert len(data["session_id"]) == 36
+
+    def test_old_instance_toml_migration(self, tmp_path: Path) -> None:
+        """instance.toml without session_id → treated as FIRST_TIME."""
+        from adapters.zulip_adapter.process_mgr import (
+            ProcessManager,
+            _sanitize_name,
+        )
+
+        cfg = self._make_cfg(tmp_path)
+        sc = self._make_stream_cfg(tmp_path)
+        mgr = ProcessManager(cfg)
+
+        # Pre-create instance.toml WITHOUT session_id (old format)
+        instance_dir = cfg.streams_dir / _sanitize_name("test-stream") / "topic1"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "instance.toml").write_text(
+            'created_at = "2026-03-01T09:00:00+08:00"\n'
+        )
+
+        with patch("adapters.zulip_adapter.process_mgr.subprocess") as mock_sub, \
+             patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=False):
+            mock_sub.run.return_value = MagicMock(returncode=0, stdout="12345", stderr=b"")
+            mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+
+            loop = asyncio.new_event_loop()
+            try:
+                result = loop.run_until_complete(
+                    mgr._lazy_create("test-stream", "topic1", sc)
+                )
+            finally:
+                loop.close()
+
+        assert result is not None
+        _, mode = result
+        assert mode == CreateMode.FIRST_TIME
+
+    # -- Claude command flag tests --
+
+    def test_claude_command_resume_flag(self, tmp_path: Path) -> None:
+        """RESUMED mode → tmux send-keys includes --resume."""
+        from adapters.zulip_adapter.process_mgr import (
+            ProcessManager,
+            _sanitize_name,
+            _write_instance_toml,
+        )
+
+        cfg = self._make_cfg(tmp_path)
+        sc = self._make_stream_cfg(tmp_path)
+        mgr = ProcessManager(cfg)
+
+        instance_dir = cfg.streams_dir / _sanitize_name("test-stream") / "topic1"
+        instance_dir.mkdir(parents=True)
+        _write_instance_toml(
+            instance_dir / "instance.toml",
+            {"session_id": "resume-uuid", "created_at": "2026-03-03T09:00:00+08:00"},
+        )
+
+        send_keys_calls = []
+
+        def mock_run(cmd, **kwargs):
+            if cmd[0] == "tmux" and len(cmd) > 1 and cmd[1] == "send-keys":
+                send_keys_calls.append(cmd)
+            return MagicMock(returncode=0, stdout="12345", stderr=b"")
+
+        with patch("adapters.zulip_adapter.process_mgr.subprocess") as mock_sub, \
+             patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=False), \
+             patch("adapters.zulip_adapter.process_mgr._session_jsonl_exists", return_value=True):
+            mock_sub.run.side_effect = mock_run
+            mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(mgr._lazy_create("test-stream", "topic1", sc))
+            finally:
+                loop.close()
+
+        assert len(send_keys_calls) == 1
+        cmd_str = send_keys_calls[0][4]  # The command string sent via send-keys
+        assert "--resume resume-uuid" in cmd_str
+        assert "--dangerously-skip-permissions" in cmd_str
+
+    def test_claude_command_session_id_flag(self, tmp_path: Path) -> None:
+        """FIRST_TIME mode → tmux send-keys includes --session-id."""
+        from adapters.zulip_adapter.process_mgr import ProcessManager
+
+        cfg = self._make_cfg(tmp_path)
+        sc = self._make_stream_cfg(tmp_path)
+        mgr = ProcessManager(cfg)
+
+        send_keys_calls = []
+
+        def mock_run(cmd, **kwargs):
+            if cmd[0] == "tmux" and len(cmd) > 1 and cmd[1] == "send-keys":
+                send_keys_calls.append(cmd)
+            return MagicMock(returncode=0, stdout="12345", stderr=b"")
+
+        with patch("adapters.zulip_adapter.process_mgr.subprocess") as mock_sub, \
+             patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=False), \
+             patch("adapters.zulip_adapter.process_mgr._session_jsonl_exists", return_value=False):
+            mock_sub.run.side_effect = mock_run
+            mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(mgr._lazy_create("test-stream", "topic1", sc))
+            finally:
+                loop.close()
+
+        assert len(send_keys_calls) == 1
+        cmd_str = send_keys_calls[0][4]
+        assert "--session-id" in cmd_str
+        assert "--resume" not in cmd_str
+        assert "--dangerously-skip-permissions" in cmd_str
+
+    def test_session_id_in_env_vars(self, tmp_path: Path) -> None:
+        """ZULIP_SESSION_ID env var set in tmux session."""
+        from adapters.zulip_adapter.process_mgr import ProcessManager
+
+        cfg = self._make_cfg(tmp_path)
+        sc = self._make_stream_cfg(tmp_path)
+        mgr = ProcessManager(cfg)
+
+        new_session_calls = []
+
+        def mock_run(cmd, **kwargs):
+            if cmd[0] == "tmux" and len(cmd) > 1 and cmd[1] == "new-session":
+                new_session_calls.append(cmd)
+            return MagicMock(returncode=0, stdout="12345", stderr=b"")
+
+        with patch("adapters.zulip_adapter.process_mgr.subprocess") as mock_sub, \
+             patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=False), \
+             patch("adapters.zulip_adapter.process_mgr._session_jsonl_exists", return_value=False):
+            mock_sub.run.side_effect = mock_run
+            mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(mgr._lazy_create("test-stream", "topic1", sc))
+            finally:
+                loop.close()
+
+        assert len(new_session_calls) == 1
+        cmd_str = " ".join(new_session_calls[0])
+        assert "ZULIP_SESSION_ID=" in cmd_str
+
+    # -- Adapter notification tests --
+
+    def test_resumed_notification(self, tmp_path: Path) -> None:
+        """RESUMED → 'Session resumed' posted to Zulip."""
+        adapter = self._make_adapter(tmp_path)
+
+        fifo = tmp_path / "runtime" / "test-stream" / "topic" / "in.zulip"
+        fifo.parent.mkdir(parents=True)
+        os.mkfifo(str(fifo))
+        sentinel_fd = os.open(str(fifo), os.O_RDONLY | os.O_NONBLOCK)
+
+        event = self._zulip_event("test-stream", "topic", "hello")
+
+        try:
+            with patch.object(
+                adapter.process_mgr, "ensure_instance",
+                return_value=(fifo, CreateMode.RESUMED),
+            ), \
+                 patch.object(adapter, "_post_message") as mock_post, \
+                 patch("adapters.zulip_adapter.adapter.scan_streams"):
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(adapter._handle_message(event))
+                finally:
+                    loop.close()
+
+            # Notification posted
+            assert mock_post.call_count == 1
+            args = mock_post.call_args[0]
+            assert "resumed" in args[2].lower()
+            assert "context restored" in args[2].lower()
+        finally:
+            os.close(sentinel_fd)
+
+    def test_fallback_notification_and_history(self, tmp_path: Path) -> None:
+        """FALLBACK → notification + history fetched + injected via FIFO."""
+        adapter = self._make_adapter(tmp_path)
+
+        fifo = tmp_path / "runtime" / "test-stream" / "topic" / "in.zulip"
+        fifo.parent.mkdir(parents=True)
+        os.mkfifo(str(fifo))
+        sentinel_fd = os.open(str(fifo), os.O_RDONLY | os.O_NONBLOCK)
+
+        event = self._zulip_event("test-stream", "topic", "hello")
+
+        history_messages = [
+            {
+                "sender_full_name": "Alice",
+                "sender_email": "alice@test.com",
+                "content": "first message",
+                "timestamp": 1709424000,
+            },
+            {
+                "sender_full_name": "Bob",
+                "sender_email": "bob@test.com",
+                "content": "second message",
+                "timestamp": 1709424060,
+            },
+        ]
+
+        fifo_writes = []
+
+        try:
+            with patch.object(
+                adapter.process_mgr, "ensure_instance",
+                return_value=(fifo, CreateMode.FALLBACK),
+            ), \
+                 patch.object(adapter, "_post_message") as mock_post, \
+                 patch.object(
+                     adapter, "_fetch_topic_history", return_value=history_messages
+                 ), \
+                 patch.object(
+                     adapter, "_write_to_fifo",
+                     side_effect=lambda p, m: (fifo_writes.append(m), True)[-1],
+                 ), \
+                 patch("adapters.zulip_adapter.adapter.scan_streams"):
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(adapter._handle_message(event))
+                finally:
+                    loop.close()
+
+            # Two notifications: "Recovering..." and "Recovered N message(s)"
+            assert mock_post.call_count == 2
+            first_msg = mock_post.call_args_list[0][0][2]
+            second_msg = mock_post.call_args_list[1][0][2]
+            assert "Recovering context" in first_msg
+            assert "Recovered 2 message(s)" in second_msg
+
+            # History context injected via FIFO (first write), then the real message
+            assert len(fifo_writes) == 2
+            assert "[Context recovery]" in fifo_writes[0]
+            assert "Alice" in fifo_writes[0]
+            assert "hello" in fifo_writes[1]
+        finally:
+            os.close(sentinel_fd)
+
+    def test_fallback_empty_history(self, tmp_path: Path) -> None:
+        """FALLBACK with no history → notification but no FIFO injection."""
+        adapter = self._make_adapter(tmp_path)
+
+        fifo = tmp_path / "runtime" / "test-stream" / "topic" / "in.zulip"
+        fifo.parent.mkdir(parents=True)
+        os.mkfifo(str(fifo))
+        sentinel_fd = os.open(str(fifo), os.O_RDONLY | os.O_NONBLOCK)
+
+        event = self._zulip_event("test-stream", "topic", "hello")
+
+        try:
+            with patch.object(
+                adapter.process_mgr, "ensure_instance",
+                return_value=(fifo, CreateMode.FALLBACK),
+            ), \
+                 patch.object(adapter, "_post_message") as mock_post, \
+                 patch.object(adapter, "_fetch_topic_history", return_value=[]), \
+                 patch("adapters.zulip_adapter.adapter.scan_streams"):
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(adapter._handle_message(event))
+                finally:
+                    loop.close()
+
+            # Only one notification (no "Recovered N" since history is empty)
+            assert mock_post.call_count == 1
+            assert "Recovering context" in mock_post.call_args_list[0][0][2]
+        finally:
+            os.close(sentinel_fd)
+
+    def test_fetch_history_filters_bot(self, tmp_path: Path) -> None:
+        """_fetch_topic_history filters out bot's own messages."""
+        adapter = self._make_adapter(tmp_path)
+
+        api_response = {
+            "result": "success",
+            "messages": [
+                {
+                    "sender_email": "user@test.com",
+                    "sender_full_name": "User",
+                    "content": "user msg",
+                    "timestamp": 1709424000,
+                },
+                {
+                    "sender_email": "bot@example.com",
+                    "sender_full_name": "Bot",
+                    "content": "bot msg",
+                    "timestamp": 1709424060,
+                },
+            ],
+        }
+
+        with patch.object(adapter, "_api_call", return_value=api_response):
+            result = adapter._fetch_topic_history("stream", "topic")
+
+        assert len(result) == 1
+        assert result[0]["content"] == "user msg"
+
+    def test_fetch_history_api_failure(self, tmp_path: Path) -> None:
+        """API failure → returns empty list gracefully."""
+        adapter = self._make_adapter(tmp_path)
+
+        with patch.object(
+            adapter, "_api_call",
+            return_value={"result": "error", "msg": "server error"},
+        ):
+            result = adapter._fetch_topic_history("stream", "topic")
+
+        assert result == []
+
+    def test_format_history_context(self, tmp_path: Path) -> None:
+        """_format_history_context produces readable context block."""
+        adapter = self._make_adapter(tmp_path)
+
+        history = [
+            {
+                "sender_full_name": "Alice",
+                "content": "What about the spec?",
+                "timestamp": 1709424000,
+            },
+        ]
+
+        result = adapter._format_history_context(history)
+        assert "[Context recovery]" in result
+        assert "Alice" in result
+        assert "What about the spec?" in result
+        assert "[End of context recovery" in result
