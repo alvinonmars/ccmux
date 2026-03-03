@@ -28,6 +28,7 @@ from pathlib import Path
 
 from .config import StreamConfig, ZulipAdapterConfig
 from .injector import Injector
+from .transcript_watcher import TranscriptWatcher, ZulipPoster, discover_transcript
 
 log = logging.getLogger(__name__)
 
@@ -209,6 +210,8 @@ class ProcessManager:
         self.cfg = cfg
         self._injectors: dict[str, Injector] = {}  # "stream/topic" → Injector
         self._injector_tasks: dict[str, asyncio.Task] = {}
+        self._watchers: dict[str, TranscriptWatcher] = {}  # "stream/topic" → watcher
+        self._watcher_tasks: dict[str, asyncio.Task] = {}
         self._sentinel_fds: dict[str, int] = {}  # "stream/topic" → fd
 
     def clean_stale_pids(self) -> int:
@@ -425,10 +428,12 @@ class ProcessManager:
             return None
 
         # 6b. Send claude command via send-keys (resume or new session)
+        # --strict-mcp-config: ignore project .mcp.json so Zulip instances
+        # don't inherit WhatsApp/other MCP servers from the shared project dir.
         if create_mode == CreateMode.RESUMED:
-            claude_cmd = f"claude --resume {session_id} --dangerously-skip-permissions"
+            claude_cmd = f"claude --resume {session_id} --dangerously-skip-permissions --strict-mcp-config"
         else:
-            claude_cmd = f"claude --session-id {session_id} --dangerously-skip-permissions"
+            claude_cmd = f"claude --session-id {session_id} --dangerously-skip-permissions --strict-mcp-config"
         try:
             subprocess.run(
                 ["tmux", "send-keys", "-t", session, claude_cmd, "Enter"],
@@ -472,8 +477,51 @@ class ProcessManager:
             injector.run(), name=f"injector-{key}"
         )
 
+        # 9. Start transcript watcher for real-time Zulip status updates
+        if key in self._watchers:
+            self._watchers[key].stop()
+        if key in self._watcher_tasks:
+            self._watcher_tasks[key].cancel()
+
+        transcript_path = discover_transcript(project_path, session_id)
+        if transcript_path:
+            poster = ZulipPoster(
+                site=env_vars.get("ZULIP_SITE", ""),
+                email=env_vars.get("ZULIP_BOT_EMAIL", ""),
+                api_key=self._read_api_key(),
+                stream=stream,
+                topic=topic,
+            )
+            if poster.site:
+                watcher = TranscriptWatcher(transcript_path, poster)
+                self._watchers[key] = watcher
+                self._watcher_tasks[key] = asyncio.create_task(
+                    watcher.run(), name=f"watcher-{key}"
+                )
+                log.info("TranscriptWatcher started for %s (path=%s)", key, transcript_path)
+
         log.info("Instance ready: stream=%s topic=%s mode=%s", stream, topic, create_mode.value)
         return fifo, create_mode
+
+    def _read_api_key(self) -> str:
+        """Read Zulip bot API key from the credentials file."""
+        cred_path = self.cfg.bot_credentials
+        if not cred_path.exists():
+            return ""
+        try:
+            for line in cred_path.read_text().splitlines():
+                if line.startswith("ZULIP_BOT_API_KEY="):
+                    value = line.split("=", 1)[1].strip()
+                    if (
+                        len(value) >= 2
+                        and value[0] == value[-1]
+                        and value[0] in ('"', "'")
+                    ):
+                        value = value[1:-1]
+                    return value
+        except OSError:
+            pass
+        return ""
 
     def _close_sentinel(self, key: str) -> None:
         """Close and remove sentinel fd for a key."""
@@ -485,7 +533,12 @@ class ProcessManager:
             del self._sentinel_fds[key]
 
     def stop_all(self) -> None:
-        """Stop all running injectors and close sentinel fds."""
+        """Stop all running injectors, watchers, and close sentinel fds."""
+        for key, watcher in self._watchers.items():
+            log.info("Stopping watcher: %s", key)
+            watcher.stop()
+        for key, task in self._watcher_tasks.items():
+            task.cancel()
         for key, injector in self._injectors.items():
             log.info("Stopping injector: %s", key)
             injector.stop()
@@ -496,6 +549,8 @@ class ProcessManager:
                 os.close(fd)
             except OSError:
                 pass
+        self._watchers.clear()
+        self._watcher_tasks.clear()
         self._injectors.clear()
         self._injector_tasks.clear()
         self._sentinel_fds.clear()

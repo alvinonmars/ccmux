@@ -3,9 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,6 +13,7 @@ from adapters.zulip_adapter.transcript_watcher import (
     ZulipPoster,
     _extract_tool_uses,
     _format_tool_status,
+    _is_assistant_text,
     discover_transcript,
 )
 
@@ -105,6 +105,65 @@ class TestExtractToolUses:
 
 
 # ---------------------------------------------------------------------------
+# _is_assistant_text
+# ---------------------------------------------------------------------------
+
+class TestIsAssistantText:
+    def test_text_only_message(self):
+        line = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Hello world"}],
+            }
+        })
+        assert _is_assistant_text(line) is True
+
+    def test_tool_use_message(self):
+        line = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}
+                ],
+            }
+        })
+        assert _is_assistant_text(line) is False
+
+    def test_mixed_text_and_tool(self):
+        line = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Let me check"},
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "/a"}},
+                ],
+            }
+        })
+        assert _is_assistant_text(line) is False
+
+    def test_user_message_ignored(self):
+        line = json.dumps({
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "hi"}],
+            }
+        })
+        assert _is_assistant_text(line) is False
+
+    def test_empty_text_ignored(self):
+        line = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "  "}],
+            }
+        })
+        assert _is_assistant_text(line) is False
+
+    def test_invalid_json(self):
+        assert _is_assistant_text("not json") is False
+
+
+# ---------------------------------------------------------------------------
 # _format_tool_status
 # ---------------------------------------------------------------------------
 
@@ -165,28 +224,27 @@ class TestDiscoverTranscript:
         )
         assert result == transcript
 
-    def test_fallback_most_recent(self, tmp_path):
+    def test_nonexistent_returns_expected_path(self, tmp_path):
+        """When session JSONL doesn't exist, return expected path (not None)."""
         claude_home = tmp_path / ".claude"
         projects_dir = claude_home / "projects" / "-home-user-project"
         projects_dir.mkdir(parents=True)
-        old = projects_dir / "old-session.jsonl"
-        old.write_text("{}\n")
-        import time
-        time.sleep(0.01)
-        new = projects_dir / "new-session.jsonl"
-        new.write_text("{}\n")
 
         result = discover_transcript(
-            "/home/user/project", "nonexistent", claude_home=claude_home
+            "/home/user/project", "nonexistent-id", claude_home=claude_home
         )
-        assert result == new
+        assert result is not None
+        assert result.name == "nonexistent-id.jsonl"
+        assert not result.exists()
 
-    def test_no_claude_dir(self, tmp_path):
+    def test_no_claude_dir_returns_expected_path(self, tmp_path):
+        """Even without .claude dir, return expected path for watcher to wait on."""
         claude_home = tmp_path / ".claude"
         result = discover_transcript(
             "/home/user/project", "abc-123", claude_home=claude_home
         )
-        assert result is None
+        assert result is not None
+        assert result.name == "abc-123.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +294,7 @@ class TestTranscriptWatcher:
         watcher.stop()
         await task
 
-        # Should have posted a tool status
+        # No ACK → should post a new message with accumulated content
         assert mock_poster.post.called
         call_args = mock_poster.post.call_args[0][0]
         assert "ls" in call_args
@@ -267,24 +325,124 @@ class TestTranscriptWatcher:
         await task
 
         mock_poster.post.assert_not_called()
+        mock_poster.update.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_ack_message_updated_on_first_tool(
+    async def test_ack_message_updated_not_new_post(
         self, transcript_file, mock_poster
     ):
+        """With ACK message, all tool updates go to the same message via update()."""
         watcher = TranscriptWatcher(
             transcript_file, mock_poster, poll_interval=0.1
         )
-        watcher.send_ack()
+        await watcher.send_ack()
 
         task = asyncio.create_task(watcher.run())
         await asyncio.sleep(0.15)
 
-        entry = json.dumps({
+        # First tool
+        entry1 = json.dumps({
             "message": {
                 "role": "assistant",
                 "content": [
                     {"type": "tool_use", "name": "Read", "input": {"file_path": "/a.py"}}
+                ],
+            }
+        })
+        with open(transcript_file, "a") as f:
+            f.write(entry1 + "\n")
+
+        await asyncio.sleep(0.3)
+
+        # Second tool
+        entry2 = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "Grep", "input": {"pattern": "TODO"}}
+                ],
+            }
+        })
+        with open(transcript_file, "a") as f:
+            f.write(entry2 + "\n")
+
+        await asyncio.sleep(0.3)
+
+        watcher.stop()
+        await task
+
+        # Both updates should go to the ACK message (id=42), not new posts
+        assert mock_poster.update.call_count >= 2
+        for call in mock_poster.update.call_args_list:
+            assert call[0][0] == 42  # All updates to ACK message id
+
+        # The post() after ACK should NOT have been called for tool status
+        # (only the initial ACK post)
+        assert mock_poster.post.call_count == 1  # Only the ACK itself
+
+    @pytest.mark.asyncio
+    async def test_accumulated_status_content(
+        self, transcript_file, mock_poster
+    ):
+        """Status lines accumulate — second update contains both lines."""
+        watcher = TranscriptWatcher(
+            transcript_file, mock_poster, poll_interval=0.1
+        )
+        await watcher.send_ack()
+
+        task = asyncio.create_task(watcher.run())
+        await asyncio.sleep(0.15)
+
+        entry1 = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "/a.py"}}
+                ],
+            }
+        })
+        with open(transcript_file, "a") as f:
+            f.write(entry1 + "\n")
+        await asyncio.sleep(0.3)
+
+        entry2 = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}
+                ],
+            }
+        })
+        with open(transcript_file, "a") as f:
+            f.write(entry2 + "\n")
+        await asyncio.sleep(0.3)
+
+        watcher.stop()
+        await task
+
+        # Last update should contain both status lines
+        last_content = mock_poster.update.call_args_list[-1][0][1]
+        assert "a.py" in last_content
+        assert "ls" in last_content
+
+    @pytest.mark.asyncio
+    async def test_parallel_tools_batched(self, transcript_file, mock_poster):
+        """Multiple tool_use blocks in one assistant message are batched."""
+        watcher = TranscriptWatcher(
+            transcript_file, mock_poster, poll_interval=0.1
+        )
+
+        task = asyncio.create_task(watcher.run())
+        await asyncio.sleep(0.15)
+
+        # Single assistant message with 3 parallel tool calls
+        entry = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "/a.py"}},
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "/b.py"}},
+                    {"type": "tool_use", "name": "Grep", "input": {"pattern": "TODO"}},
                 ],
             }
         })
@@ -295,9 +453,89 @@ class TestTranscriptWatcher:
         watcher.stop()
         await task
 
-        # First tool should UPDATE the ACK message, not post new
-        mock_poster.update.assert_called_once()
-        assert mock_poster.update.call_args[0][0] == 42  # message_id from ACK
+        # Should post ONE message containing all 3 tool statuses
+        assert mock_poster.post.call_count == 1
+        content = mock_poster.post.call_args[0][0]
+        assert "a.py" in content
+        assert "b.py" in content
+        assert "TODO" in content
+
+    @pytest.mark.asyncio
+    async def test_file_truncation_resets_offset(
+        self, transcript_file, mock_poster
+    ):
+        """When transcript file shrinks (new session), offset resets and reads new data."""
+        # Write large initial content so offset is high
+        old_entries = []
+        for i in range(10):
+            old_entries.append(json.dumps({
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Bash",
+                         "input": {"command": f"old-command-{i}-padding" + "x" * 50}}
+                    ],
+                }
+            }))
+        transcript_file.write_text("\n".join(old_entries) + "\n")
+
+        watcher = TranscriptWatcher(
+            transcript_file, mock_poster, poll_interval=0.1
+        )
+        # Watcher starts, seeks to end of large file
+        task = asyncio.create_task(watcher.run())
+        await asyncio.sleep(0.2)
+
+        # Truncate and write small new content — clearly smaller than offset
+        new_entry = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "new"}}
+                ],
+            }
+        })
+        transcript_file.write_text(new_entry + "\n")
+
+        await asyncio.sleep(0.4)
+        watcher.stop()
+        await task
+
+        # Should have detected the new content after truncation
+        assert mock_poster.post.called
+        content = mock_poster.post.call_args[0][0]
+        assert "new" in content
+
+    @pytest.mark.asyncio
+    async def test_assistant_text_shows_responding(
+        self, transcript_file, mock_poster
+    ):
+        """Assistant text-only messages produce a 'Responding...' status."""
+        watcher = TranscriptWatcher(
+            transcript_file, mock_poster, poll_interval=0.1
+        )
+
+        task = asyncio.create_task(watcher.run())
+        await asyncio.sleep(0.15)
+
+        entry = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Here is my analysis..."}
+                ],
+            }
+        })
+        with open(transcript_file, "a") as f:
+            f.write(entry + "\n")
+
+        await asyncio.sleep(0.3)
+        watcher.stop()
+        await task
+
+        assert mock_poster.post.called
+        content = mock_poster.post.call_args[0][0]
+        assert "Responding" in content
 
     @pytest.mark.asyncio
     async def test_stop_is_clean(self, transcript_file, mock_poster):
@@ -347,3 +585,4 @@ class TestTranscriptWatcher:
 
         # Should NOT have posted anything (pre-existing content ignored)
         mock_poster.post.assert_not_called()
+        mock_poster.update.assert_not_called()

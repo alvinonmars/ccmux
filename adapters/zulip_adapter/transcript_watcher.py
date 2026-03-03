@@ -1,17 +1,16 @@
 """Transcript JSONL watcher for Zulip intermediate output.
 
-Monitors a Claude Code transcript file for new tool_use entries and posts
-brief status updates to Zulip. Gives users real-time visibility into what
-Claude is doing during a turn (before the Stop hook fires the final response).
+Monitors a Claude Code transcript file for new assistant entries and posts
+status updates to Zulip. Gives users real-time visibility into what Claude
+is doing during a turn (before the Stop hook fires the final response).
 
 Architecture:
     - Runs as an asyncio task per active session
-    - Polls the transcript file for new lines (os.stat mtime + seek)
-    - Parses tool_use entries → posts brief summaries to Zulip
+    - Polls the transcript file for new lines (os.stat size + seek)
+    - Parses assistant entries → posts status summaries to Zulip
+    - Accumulates all status lines into a single Zulip message (updated in place)
     - Stops when signaled (Stop hook or session end)
 
-This module is intentionally independent of process_mgr.py to allow
-parallel development with session resilience work (TODO #21).
 Integration point: ProcessManager starts/stops a TranscriptWatcher
 per instance after lazy_create.
 
@@ -129,10 +128,40 @@ def _extract_tool_uses(line: str) -> list[tuple[str, dict]]:
     return results
 
 
+def _is_assistant_text(line: str) -> bool:
+    """Return True if the line is an assistant message with text content (no tools)."""
+    try:
+        record = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return False
+
+    msg = record.get("message", {})
+    if msg.get("role") != "assistant":
+        return False
+
+    content = msg.get("content", [])
+    if not isinstance(content, list):
+        return False
+
+    has_text = False
+    has_tool = False
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text" and block.get("text", "").strip():
+            has_text = True
+        if block.get("type") == "tool_use":
+            has_tool = True
+
+    return has_text and not has_tool
+
+
 class ZulipPoster:
     """Lightweight Zulip API client for posting status messages.
 
     Reads credentials from environment variables (same as zulip_relay_hook.py).
+    All methods are synchronous (urllib); callers in async contexts should use
+    run_in_executor().
     """
 
     def __init__(
@@ -229,6 +258,9 @@ class ZulipPoster:
 class TranscriptWatcher:
     """Watch a transcript JSONL file and post tool activity to Zulip.
 
+    All status lines are accumulated into a single Zulip message that is
+    updated in place, preventing topic flooding.
+
     Usage:
         watcher = TranscriptWatcher(transcript_path, poster)
         task = asyncio.create_task(watcher.run())
@@ -249,16 +281,19 @@ class TranscriptWatcher:
         self.poll_interval = poll_interval
         self._running = True
         self._offset = 0  # File position to read from
-        self._status_msg_id: int | None = None  # ACK message to update
-        self._tool_count = 0
+        self._status_msg_id: int | None = None  # Single status message to update
+        self._status_lines: list[str] = []  # Accumulated status lines
 
     def stop(self) -> None:
         """Signal the watcher to stop."""
         self._running = False
 
-    def send_ack(self) -> None:
+    async def send_ack(self) -> None:
         """Post initial ACK message to Zulip. Call after message injection."""
-        msg_id = self.poster.post("\u23f3 Working...")  # ⏳
+        loop = asyncio.get_running_loop()
+        msg_id = await loop.run_in_executor(
+            None, self.poster.post, "\u23f3 Working..."  # ⏳
+        )
         if msg_id:
             self._status_msg_id = msg_id
             log.info("Posted ACK message: %d", msg_id)
@@ -279,21 +314,37 @@ class TranscriptWatcher:
                     continue
 
                 current_size = self.transcript_path.stat().st_size
-                if current_size <= self._offset:
+                if current_size == self._offset:
                     continue  # No new data
+
+                # File was truncated/replaced (new session) — reset to start
+                if current_size < self._offset:
+                    log.info(
+                        "Transcript file shrunk (%d < %d), resetting offset",
+                        current_size, self._offset,
+                    )
+                    self._offset = 0
 
                 # Read new lines
                 new_lines = self._read_new_lines()
                 if not new_lines:
                     continue
 
-                # Extract and post tool_use entries
+                # Collect all status updates from this batch
+                batch_lines: list[str] = []
                 for line in new_lines:
+                    # Check for tool_use entries
                     tool_uses = _extract_tool_uses(line)
-                    for name, inp in tool_uses:
-                        status = _format_tool_status(name, inp)
-                        self._tool_count += 1
-                        self._post_tool_status(status)
+                    if tool_uses:
+                        # Batch all tools from a single assistant message together
+                        for name, inp in tool_uses:
+                            batch_lines.append(_format_tool_status(name, inp))
+                    elif _is_assistant_text(line):
+                        batch_lines.append("\U0001f4ac Responding...")  # 💬
+
+                if batch_lines:
+                    self._status_lines.extend(batch_lines)
+                    await self._update_status_message()
 
         except asyncio.CancelledError:
             pass
@@ -301,9 +352,9 @@ class TranscriptWatcher:
             log.error("TranscriptWatcher error: %s", e)
         finally:
             log.info(
-                "TranscriptWatcher stopped: %s (posted %d tool updates)",
+                "TranscriptWatcher stopped: %s (posted %d status updates)",
                 self.transcript_path,
-                self._tool_count,
+                len(self._status_lines),
             )
 
     def _read_new_lines(self) -> list[str]:
@@ -324,16 +375,23 @@ class TranscriptWatcher:
                 lines.append(line)
         return lines
 
-    def _post_tool_status(self, status: str) -> None:
-        """Post a tool status update to Zulip."""
-        # Update the ACK message with accumulated status,
-        # or post as new message if no ACK was sent
-        if self._status_msg_id and self._tool_count <= 1:
-            # First tool: update the ACK message
-            self.poster.update(self._status_msg_id, status)
+    async def _update_status_message(self) -> None:
+        """Update the single status message with all accumulated lines."""
+        content = "\n".join(self._status_lines)
+        loop = asyncio.get_running_loop()
+
+        if self._status_msg_id:
+            # Update existing message
+            await loop.run_in_executor(
+                None, self.poster.update, self._status_msg_id, content,
+            )
         else:
-            # Subsequent tools: post new messages
-            self.poster.post(status)
+            # No ACK was sent — create new message
+            msg_id = await loop.run_in_executor(
+                None, self.poster.post, content,
+            )
+            if msg_id:
+                self._status_msg_id = msg_id
 
 
 def discover_transcript(
@@ -352,7 +410,8 @@ def discover_transcript(
         session_id: The Claude session UUID.
         claude_home: Override for ~/.claude (for testing).
 
-    Returns None if the file doesn't exist (yet).
+    Returns the path if it exists, or None. Does NOT fall back to other sessions
+    to avoid accidentally watching the wrong transcript.
     """
     project_path = Path(project_path).resolve()
     # Claude's project hash: absolute path with / replaced by -
@@ -364,16 +423,7 @@ def discover_transcript(
     if transcript.exists():
         return transcript
 
-    # Fallback: scan for most recent .jsonl in the directory
-    if claude_dir.is_dir():
-        jsonl_files = sorted(
-            claude_dir.glob("*.jsonl"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        # Filter out subagent transcripts (in subdirectories)
-        for f in jsonl_files:
-            if f.parent == claude_dir:
-                return f
-
-    return None
+    # Return the expected path even if it doesn't exist yet —
+    # Claude may not have created it at startup time.
+    # The watcher's run() loop handles non-existent files gracefully.
+    return transcript
