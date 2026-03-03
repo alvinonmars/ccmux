@@ -110,6 +110,7 @@ DEFAULT_ALLOWLISTED_STRINGS = {
 
 ALLOWLISTED_FILES = {
     ".claude/CLAUDE.md",
+    "tests/unit/test_privacy_check.py",
 }
 
 BINARY_EXTENSIONS = {
@@ -238,6 +239,36 @@ def scan_content(
     return findings
 
 
+def scan_filename(
+    filepath: str,
+    patterns: list[tuple[str, str, int]],
+    allowlist: set[str],
+) -> list[dict]:
+    """Scan the filename/path itself against patterns (not file content).
+
+    Filenames use _ - . / as delimiters (all word chars or path seps), so
+    \\b word boundaries miss names like 'joy_daily'.  We normalize delimiters
+    to spaces so word-boundary patterns can match individual components.
+    """
+    # Normalize path delimiters to spaces so \b patterns work on components
+    normalized = re.sub(r"[/_.\-]", " ", filepath)
+
+    findings = []
+    for pattern, category, flags in patterns:
+        for match in re.finditer(pattern, normalized, flags):
+            matched_text = match.group()
+            if matched_text in allowlist:
+                continue
+            findings.append({
+                "file": filepath,
+                "line": 0,
+                "category": category,
+                "match": matched_text,
+                "context": f"(filename: {filepath})",
+            })
+    return findings
+
+
 def scan_files(
     files: list[str],
     patterns: list[tuple[str, str, int]],
@@ -249,6 +280,10 @@ def scan_files(
     for filepath in files:
         if filepath in ALLOWLISTED_FILES:
             continue
+
+        # Scan filename itself — even binary files can have PII in names
+        all_findings.extend(scan_filename(filepath, patterns, allowlist))
+
         if is_binary(filepath):
             continue
 
