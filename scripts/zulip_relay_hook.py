@@ -137,11 +137,19 @@ def main() -> None:
                     value = value[1:-1]
                 api_key = value
     if not api_key:
+        print(
+            f"zulip_relay_hook: no ZULIP_BOT_API_KEY found in {key_file}",
+            file=sys.stderr,
+        )
         return
 
     site = os.environ.get("ZULIP_SITE", "")
     email = os.environ.get("ZULIP_BOT_EMAIL", "")
     if not site or not email:
+        print(
+            f"zulip_relay_hook: missing ZULIP_SITE or ZULIP_BOT_EMAIL",
+            file=sys.stderr,
+        )
         return
 
     cred = base64.b64encode(f"{email}:{api_key}".encode()).decode()
