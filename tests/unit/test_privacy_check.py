@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import tempfile
 
 import pytest
 
 from scripts.privacy_check import (
+    check_syntax_compat,
     scan_content,
     scan_filename,
     scan_files,
@@ -159,4 +163,64 @@ class TestScanContent:
             [PHONE_PATTERN, BLOCKLIST_PATTERN_JOY],
             set(),
         )
+        assert len(findings) == 0
+
+
+# ---------------------------------------------------------------------------
+# check_syntax_compat
+# ---------------------------------------------------------------------------
+
+def _sys_python_is_older() -> bool:
+    """Return True if system python3 differs from current interpreter."""
+    which = subprocess.run(["which", "python3"], capture_output=True, text=True)
+    if not which.stdout.strip():
+        return False
+    ver = subprocess.run(
+        [which.stdout.strip(), "--version"], capture_output=True, text=True,
+    )
+    import sys as _sys
+    return ver.stdout.strip() != f"Python {_sys.version.split()[0]}"
+
+
+@pytest.mark.skipif(
+    not _sys_python_is_older(),
+    reason="system python3 is same version as venv — compat check skips",
+)
+class TestSyntaxCompat:
+    """Verify syntax compat check catches PEP 604 union types in older Python."""
+
+    def test_catches_union_type_without_future(self):
+        with tempfile.NamedTemporaryFile(
+            suffix=".py", mode="w", delete=False, dir="."
+        ) as f:
+            # "Stdlib only" marker in docstring triggers the compat check
+            f.write('"""Stdlib only."""\nfrom pathlib import Path\ndef foo() -> Path | None: pass\n')
+            tmpfile = f.name
+        try:
+            findings = check_syntax_compat([tmpfile])
+            assert len(findings) == 1
+            assert findings[0]["category"] == "SYNTAX_COMPAT"
+            assert "TypeError" in findings[0]["context"]
+        finally:
+            os.unlink(tmpfile)
+
+    def test_passes_with_future_annotations(self):
+        with tempfile.NamedTemporaryFile(
+            suffix=".py", mode="w", delete=False, dir="."
+        ) as f:
+            f.write(
+                '"""Stdlib only."""\n'
+                "from __future__ import annotations\n"
+                "from pathlib import Path\n"
+                "def foo() -> Path | None: pass\n"
+            )
+            tmpfile = f.name
+        try:
+            findings = check_syntax_compat([tmpfile])
+            assert len(findings) == 0
+        finally:
+            os.unlink(tmpfile)
+
+    def test_skips_non_python_files(self):
+        findings = check_syntax_compat(["README.md", "data.json"])
         assert len(findings) == 0

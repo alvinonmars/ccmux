@@ -524,6 +524,82 @@ def verify_token() -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
+# Syntax compatibility check
+# ---------------------------------------------------------------------------
+
+# Scripts using #!/usr/bin/env python3 may run under system Python (e.g. 3.9)
+# rather than the venv Python (3.12). Catch syntax incompatibilities early.
+
+SYSTEM_PYTHON = "/usr/bin/env python3"  # resolves via PATH at commit time
+
+
+def check_syntax_compat(files: list[str]) -> list[dict]:
+    """Load staged .py files with system Python to catch compat issues.
+
+    Uses importlib (not ast.parse) because PEP 604 union types (X | Y)
+    are valid syntax in all Python versions but fail at runtime in <3.10
+    when annotations are evaluated.  importlib.exec_module evaluates
+    function definitions (and their annotations) without running main().
+
+    Returns list of findings for any files that fail.
+    Silently skips if system python3 is unavailable or same version.
+    """
+    # Find system python3 via PATH (same as #!/usr/bin/env python3 shebang)
+    which = subprocess.run(
+        ["which", "python3"], capture_output=True, text=True,
+    )
+    sys_python = which.stdout.strip()
+    if not sys_python:
+        return []
+
+    # Skip if system python is same version as current interpreter
+    ver = subprocess.run(
+        [sys_python, "--version"], capture_output=True, text=True,
+    )
+    sys_ver = ver.stdout.strip()
+    cur_ver = f"Python {sys.version.split()[0]}"
+    if sys_ver == cur_ver:
+        return []
+
+    print(f"Syntax compat: checking against {sys_ver} ({sys_python})")
+
+    findings = []
+    py_files = [f for f in files if f.endswith(".py")]
+    for filepath in py_files:
+        # Only check scripts with "Stdlib only" in their module docstring
+        # (these run under system Python, not the venv).
+        try:
+            content = Path(filepath).read_text(errors="replace")
+        except OSError:
+            continue
+        # Match only in the first 500 chars (docstring area) to avoid
+        # matching this very source file's reference to the marker.
+        if "Stdlib only" not in content[:500]:
+            continue
+        # Use importlib to load the module without running __main__ guard.
+        # This evaluates function definitions (including type annotations),
+        # catching runtime TypeError from PEP 604 union types in <3.10.
+        result = subprocess.run(
+            [sys_python, "-c",
+             "import importlib.util;"
+             f"s=importlib.util.spec_from_file_location('_ck',{filepath!r});"
+             "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            err_lines = result.stderr.strip().splitlines()
+            err = err_lines[-1] if err_lines else "import error"
+            findings.append({
+                "file": filepath,
+                "line": 0,
+                "category": "SYNTAX_COMPAT",
+                "match": sys_ver,
+                "context": err[:120],
+            })
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 
@@ -645,6 +721,10 @@ def main() -> int:
             return 0
         print(f"Privacy check: scanning {len(files)} staged file(s)...")
         findings = scan_files(files, all_patterns, allowlist, staged_only=True)
+
+    # --- Syntax compat check (system Python) ---
+    compat_findings = check_syntax_compat(files)
+    findings.extend(compat_findings)
 
     # --- Report Layer 1 results ---
     print_report(findings)
