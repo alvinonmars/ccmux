@@ -138,6 +138,12 @@ def main() -> None:
     control_sock = _get_control_sock(cwd)
 
     if event == "Stop":
+        # Zulip instances have their own output path (zulip_relay_hook.py).
+        # Skip the daemon broadcast to avoid leaking Zulip responses to
+        # WhatsApp via output.sock → wa_notifier.
+        if os.environ.get("ZULIP_STREAM"):
+            return
+
         transcript_path = hook_data.get("transcript_path", "")
         turn = _read_last_assistant_turn(transcript_path)
         if turn is None:

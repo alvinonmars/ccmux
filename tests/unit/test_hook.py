@@ -14,12 +14,15 @@ def _run_hook(
     hook_script: Path,
     data: dict,
     control_sock: Path | None = None,
+    extra_env: dict | None = None,
 ) -> tuple[int, bytes, bytes]:
     """Run hook.py with given data as stdin. Returns (returncode, stdout, stderr)."""
     import subprocess
-    env = None
+    env = {**os.environ}
     if control_sock is not None:
-        env = {**os.environ, "CCMUX_CONTROL_SOCK": str(control_sock)}
+        env["CCMUX_CONTROL_SOCK"] = str(control_sock)
+    if extra_env:
+        env.update(extra_env)
     result = subprocess.run(
         [sys.executable, str(hook_script)],
         input=json.dumps(data).encode(),
@@ -222,6 +225,49 @@ def test_hook_error_stderr_output(tmp_path):
     rc, _, stderr = _run_hook(HOOK_SCRIPT, data, control_sock=sock_path)
     assert rc == 0
     assert b"ccmux hook:" in stderr, f"stderr should contain 'ccmux hook:', got: {stderr}"
+
+
+def test_hook_stop_skipped_for_zulip_instance(tmp_path):
+    """Stop hook skips broadcast when ZULIP_STREAM is set (Zulip isolation)."""
+    sock_path = tmp_path / "control.sock"
+    received: list[dict] = []
+
+    def server():
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.bind(str(sock_path))
+            s.listen(1)
+            s.settimeout(2.0)
+            try:
+                conn, _ = s.accept()
+                with conn:
+                    data = conn.recv(4096)
+                    if data:
+                        received.append(json.loads(data.strip()))
+            except socket.timeout:
+                pass  # Expected — no connection should arrive
+
+    t = threading.Thread(target=server, daemon=True)
+    t.start()
+    time.sleep(0.1)
+
+    data = {
+        "hook_event_name": "Stop",
+        "session_id": "zulip-sess",
+        "transcript_path": str(tmp_path / "none.jsonl"),
+        "last_assistant_message": "zulip response",
+        "cwd": str(tmp_path),
+        "permission_mode": "default",
+    }
+    rc, _, _ = _run_hook(
+        HOOK_SCRIPT, data, control_sock=sock_path,
+        extra_env={"ZULIP_STREAM": "ccmux-dev"},
+    )
+    assert rc == 0
+
+    t.join(timeout=3.0)
+    assert received == [], (
+        f"Stop hook should NOT send broadcast when ZULIP_STREAM is set, got: {received}"
+    )
 
 
 def test_hook_error_log_truncated_when_oversized(tmp_path):
