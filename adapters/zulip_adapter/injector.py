@@ -76,7 +76,11 @@ def _tmux_has_session(session: str) -> bool:
 
 
 def _inject_text(session: str, text: str) -> bool:
-    """Inject text into tmux session via send-keys. Returns True on success."""
+    """Inject text into tmux session via send-keys. Returns True on success.
+
+    A short delay between text and Enter prevents the TUI from dropping
+    the Enter key when still processing a large or multi-line paste.
+    """
     try:
         r1 = subprocess.run(
             ["tmux", "send-keys", "-t", session, "-l", text],
@@ -87,6 +91,8 @@ def _inject_text(session: str, text: str) -> bool:
             log.error("send-keys text failed (rc=%d): %s", r1.returncode,
                        r1.stderr.decode(errors="replace").strip())
             return False
+        # Give the TUI time to process the pasted text before sending Enter.
+        time.sleep(0.15)
         r2 = subprocess.run(
             ["tmux", "send-keys", "-t", session, "Enter"],
             capture_output=True,
@@ -109,7 +115,12 @@ class InjectionGate:
         self.session = session
 
     def is_ready(self) -> bool:
-        """Return True if Claude is ready (prompt visible, terminal idle)."""
+        """Return True if Claude is ready (prompt visible on last lines, terminal idle).
+
+        Only checks the last few non-empty lines for the ❯ prompt to avoid
+        false positives from old prompts still visible in scrollback while
+        Claude is actively generating output.
+        """
         # Check terminal idle
         activity_ts = _tmux_client_activity(self.session)
         if activity_ts > 0 and (time.time() - activity_ts) < IDLE_THRESHOLD:
@@ -120,8 +131,11 @@ class InjectionGate:
         if not pane:
             return False
 
-        # Check for Claude prompt
-        if CLAUDE_PROMPT_RE.search(pane):
+        # Only check the last 3 non-empty lines for the prompt.
+        # Old ❯ prompts in scrollback should not count as "ready".
+        lines = [ln for ln in pane.splitlines() if ln.strip()]
+        tail = "\n".join(lines[-3:]) if lines else ""
+        if CLAUDE_PROMPT_RE.search(tail):
             return True
 
         return False
@@ -141,6 +155,9 @@ class InjectionGate:
 class Injector:
     """FIFO reader + injection gate for a single instance."""
 
+    # Grace period before checking is_claude_dead() — Claude needs ~2-3s to start
+    STARTUP_GRACE = 5.0
+
     def __init__(self, fifo_path: str, tmux_session: str, pid_file: str | None = None):
         self.fifo_path = fifo_path
         self.tmux_session = tmux_session
@@ -148,6 +165,7 @@ class Injector:
         self.gate = InjectionGate(tmux_session)
         self._queue: list[str] = []
         self._running = True
+        self._start_time = time.monotonic()
 
     def stop(self) -> None:
         self._running = False
@@ -171,13 +189,14 @@ class Injector:
                     log.warning("tmux session %s gone, exiting", self.tmux_session)
                     break
 
-                # Check if Claude has exited
-                if self.gate.is_claude_dead():
-                    log.warning(
-                        "Claude exited in session %s (shell prompt detected), exiting",
-                        self.tmux_session,
-                    )
-                    break
+                # Check if Claude has exited (skip during startup grace period)
+                if (time.monotonic() - self._start_time) >= self.STARTUP_GRACE:
+                    if self.gate.is_claude_dead():
+                        log.warning(
+                            "Claude exited in session %s (shell prompt detected), exiting",
+                            self.tmux_session,
+                        )
+                        break
 
                 # Read from FIFO (non-blocking)
                 try:

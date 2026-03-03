@@ -83,6 +83,8 @@ def inject(pane: libtmux.Pane, text: str) -> None:
         return
     try:
         _send_keys_with_timeout(pane_id, ["-l", text])
+        # Give the TUI time to process the pasted text before sending Enter.
+        time.sleep(0.15)
         _send_keys_with_timeout(pane_id, ["Enter"])
     except subprocess.TimeoutExpired as exc:
         raise InjectionTimeout(
