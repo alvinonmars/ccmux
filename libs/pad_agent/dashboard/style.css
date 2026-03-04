@@ -1,0 +1,540 @@
+/* KidPad Dashboard v3 — Child-friendly styles for Fully Kiosk Browser
+ * Target: 7-year-old, tablet (landscape + portrait), no scrolling
+ * Color palette: pastel blues, cheerful accents, large tap targets
+ */
+
+/* === Reset & Base === */
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html, body {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+    font-family: system-ui, -apple-system, sans-serif;
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+body {
+    background: linear-gradient(160deg, #E3F2FD 0%, #BBDEFB 50%, #E1F5FE 100%);
+    color: #1A237E;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* === Dashboard Page === */
+.dashboard {
+    width: 100%;
+    height: 100%;
+    max-width: 800px;
+    padding: 16px 24px 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+/* === Header Bar (weather + date) === */
+.header-bar {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 8px;
+    font-size: 1rem;
+    color: #5C6BC0;
+    font-weight: 500;
+    flex-shrink: 0;
+}
+
+.weather-info {
+    font-size: 1.05rem;
+}
+
+.date-info {
+    font-size: 1rem;
+    color: #7986CB;
+}
+
+/* === Greeting === */
+.greeting {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: #1565C0;
+    text-align: center;
+    padding: 2px 0;
+    text-shadow: 0 1px 2px rgba(21, 101, 192, 0.1);
+    flex-shrink: 0;
+}
+
+/* === Reminder Banner === */
+.reminder-banner {
+    width: 100%;
+    max-width: 500px;
+    background: #FFF3E0;
+    border: 2px solid #FFB74D;
+    border-radius: 16px;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    animation: slideIn 0.4s ease-out;
+    flex-shrink: 0;
+}
+
+.reminder-icon {
+    font-size: 1.6rem;
+    line-height: 1;
+}
+
+.reminder-text {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #E65100;
+}
+
+@keyframes slideIn {
+    from { transform: translateY(-20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+}
+
+/* === Schedule Card === */
+.schedule-card {
+    background: #FFFFFF;
+    border-radius: 20px;
+    padding: 14px 20px;
+    width: 100%;
+    max-width: 500px;
+    box-shadow: 0 3px 16px rgba(21, 101, 192, 0.1);
+    flex-shrink: 0;
+}
+
+.card-label {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: #5C6BC0;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.card-label::before {
+    content: "\1F4C5";
+    font-size: 1rem;
+}
+
+.schedule-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.schedule-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 0;
+    font-size: 1.05rem;
+    color: #283593;
+}
+
+.schedule-time {
+    font-weight: 700;
+    color: #5C6BC0;
+    min-width: 50px;
+}
+
+.schedule-icon {
+    font-size: 1.3rem;
+    line-height: 1;
+}
+
+.schedule-name {
+    font-weight: 500;
+}
+
+/* === Time Card (compact) === */
+.time-card {
+    background: #FFFFFF;
+    border-radius: 20px;
+    padding: 14px 20px;
+    width: 100%;
+    max-width: 500px;
+    box-shadow: 0 3px 16px rgba(21, 101, 192, 0.1);
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.time-label {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: #5C6BC0;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 8px;
+}
+
+/* Progress bar */
+.progress-bar {
+    width: 100%;
+    height: 24px;
+    background: #E8EAF6;
+    border-radius: 12px;
+    overflow: hidden;
+    position: relative;
+}
+
+.progress-fill {
+    height: 100%;
+    border-radius: 12px;
+    background-color: #4CAF50;
+    transition: width 0.8s ease, background-color 0.6s ease;
+    min-width: 0;
+}
+
+.time-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-top: 6px;
+}
+
+.time-text {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: #283593;
+}
+
+.session-text {
+    font-size: 0.85rem;
+    color: #7986CB;
+}
+
+.eye-break-inline {
+    font-size: 0.85rem;
+    color: #5C6BC0;
+    margin-top: 4px;
+}
+
+/* === App Grid === */
+.app-grid {
+    display: flex;
+    gap: 14px;
+    justify-content: center;
+    align-items: center;
+    flex-wrap: wrap;
+    width: 100%;
+    max-width: 600px;
+    padding: 2px 0;
+}
+
+.app-button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 120px;
+    height: 100px;
+    background: #FFFFFF;
+    border: 3px solid #E8EAF6;
+    border-radius: 22px;
+    font-size: 1rem;
+    font-weight: 600;
+    color: #3949AB;
+    cursor: pointer;
+    box-shadow: 0 3px 12px rgba(21, 101, 192, 0.1);
+    transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+    line-height: 1.4;
+    -webkit-tap-highlight-color: transparent;
+    outline: none;
+    font-family: inherit;
+}
+
+.app-button:active {
+    transform: scale(0.93);
+    box-shadow: 0 1px 6px rgba(21, 101, 192, 0.15);
+    border-color: #90CAF9;
+    background: #E3F2FD;
+}
+
+.app-button .emoji {
+    font-size: 2.2rem;
+    line-height: 1;
+    margin-bottom: 2px;
+}
+
+/* === Homework Footer === */
+.homework-footer {
+    width: 100%;
+    max-width: 500px;
+    padding: 8px 16px;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 14px;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.homework-text {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: #5C6BC0;
+}
+
+/* === Lock Screen === */
+.lock-screen {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    background: linear-gradient(160deg, #E3F2FD 0%, #BBDEFB 50%, #E1F5FE 100%);
+    z-index: 9999;
+    padding: 32px;
+}
+
+.lock-icon {
+    font-size: 6rem;
+    line-height: 1;
+    animation: gentleBounce 2.5s ease-in-out infinite;
+}
+
+@keyframes gentleBounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-10px); }
+}
+
+.lock-message {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: #1565C0;
+    text-align: center;
+    max-width: 480px;
+    line-height: 1.4;
+}
+
+/* Countdown (eye break) */
+.countdown {
+    font-size: 5rem;
+    font-weight: 800;
+    color: #1565C0;
+    line-height: 1;
+    animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.08); opacity: 0.85; }
+}
+
+/* === Tomorrow Schedule (lock screen bedtime) === */
+.tomorrow-schedule {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 16px;
+    padding: 16px 24px;
+    max-width: 400px;
+    width: 100%;
+    text-align: left;
+}
+
+.tomorrow-label {
+    font-size: 0.9rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+    color: #90CAF9;
+}
+
+.tomorrow-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 0;
+    font-size: 1.1rem;
+    color: #B3E5FC;
+}
+
+.tomorrow-time {
+    font-weight: 700;
+    min-width: 50px;
+    color: #90CAF9;
+}
+
+.tomorrow-icon {
+    font-size: 1.3rem;
+    line-height: 1;
+}
+
+.tomorrow-name {
+    font-weight: 500;
+}
+
+/* === Bedtime Dark Mode === */
+.bedtime-mode {
+    background: linear-gradient(160deg, #1A1A2E 0%, #16213E 50%, #0F3460 100%) !important;
+}
+
+.bedtime-mode .lock-icon {
+    filter: brightness(0.9);
+}
+
+.bedtime-mode .lock-message {
+    color: #90CAF9;
+}
+
+.bedtime-mode .countdown {
+    color: #64B5F6;
+}
+
+/* === Responsive: Portrait === */
+@media (orientation: portrait) {
+    .dashboard {
+        padding: 12px 16px 8px;
+        gap: 6px;
+    }
+
+    .greeting {
+        font-size: 1.5rem;
+    }
+
+    .schedule-card,
+    .time-card {
+        padding: 12px 16px;
+    }
+
+    .time-text {
+        font-size: 1.1rem;
+    }
+
+    .app-grid {
+        gap: 10px;
+    }
+
+    .app-button {
+        width: 105px;
+        height: 90px;
+        font-size: 0.95rem;
+        border-radius: 18px;
+    }
+
+    .lock-icon {
+        font-size: 5rem;
+    }
+
+    .lock-message {
+        font-size: 1.5rem;
+    }
+
+    .countdown {
+        font-size: 4rem;
+    }
+}
+
+/* === Responsive: Small tablets / phones === */
+@media (max-width: 480px) {
+    .dashboard {
+        padding: 8px 10px 6px;
+    }
+
+    .greeting {
+        font-size: 1.3rem;
+    }
+
+    .header-bar {
+        font-size: 0.85rem;
+    }
+
+    .schedule-card,
+    .time-card {
+        padding: 10px 14px;
+        border-radius: 16px;
+    }
+
+    .progress-bar {
+        height: 20px;
+        border-radius: 10px;
+    }
+
+    .time-text {
+        font-size: 1rem;
+    }
+
+    .app-button {
+        width: 90px;
+        height: 80px;
+        font-size: 0.85rem;
+        border-radius: 14px;
+    }
+}
+
+/* === Landscape short viewport === */
+@media (orientation: landscape) and (max-height: 480px) {
+    .dashboard {
+        flex-direction: row;
+        flex-wrap: wrap;
+        justify-content: center;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 16px;
+    }
+
+    .header-bar {
+        width: 100%;
+        order: -2;
+    }
+
+    .greeting {
+        width: 100%;
+        font-size: 1.3rem;
+        padding: 0;
+        order: -1;
+    }
+
+    .reminder-banner {
+        width: 100%;
+        order: 0;
+    }
+
+    .schedule-card {
+        flex: 1;
+        min-width: 220px;
+        max-width: 320px;
+        padding: 10px 14px;
+    }
+
+    .time-card {
+        flex: 1;
+        min-width: 220px;
+        max-width: 320px;
+        padding: 10px 14px;
+    }
+
+    .app-grid {
+        flex: 1;
+        min-width: 220px;
+        max-width: 320px;
+    }
+
+    .app-button {
+        width: 90px;
+        height: 75px;
+        font-size: 0.85rem;
+    }
+
+    .homework-footer {
+        width: 100%;
+    }
+}

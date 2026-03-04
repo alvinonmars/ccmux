@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>KidPad</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Header: weather + date -->
+        <div class="header-bar" id="headerBar">
+            <span class="weather-info" id="weatherInfo"></span>
+            <span class="date-info" id="dateInfo"></span>
+        </div>
+
+        <h1 class="greeting" id="greeting">Hello!</h1>
+
+        <!-- Reminder banner (hidden by default) -->
+        <div class="reminder-banner" id="reminderBanner" style="display:none">
+            <span class="reminder-icon" id="reminderIcon"></span>
+            <span class="reminder-text" id="reminderText"></span>
+        </div>
+
+        <!-- Schedule card -->
+        <div class="schedule-card" id="scheduleCard" style="display:none">
+            <div class="card-label">TODAY</div>
+            <div class="schedule-list" id="scheduleList"></div>
+        </div>
+
+        <!-- Screen time (compact) -->
+        <div class="time-card">
+            <div class="time-label">Screen Time</div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress"></div>
+            </div>
+            <div class="time-row">
+                <span class="time-text" id="timeText">0 / 60 min</span>
+                <span class="session-text" id="sessionText">Session: 0 min</span>
+            </div>
+            <div class="eye-break-inline" id="eyeBreak">Eye break in: -- min</div>
+        </div>
+
+        <!-- App grid -->
+        <div class="app-grid">
+            <button class="app-button" onclick="launchApp('org.tuxpaint')">
+                <span class="emoji">&#x1F3A8;</span>
+                Draw
+            </button>
+            <button class="app-button" onclick="launchApp('org.schabi.newpipe')">
+                <span class="emoji">&#x1F4FA;</span>
+                Video
+            </button>
+            <button class="app-button" onclick="launchApp('com.android.chrome')">
+                <span class="emoji">&#x1F310;</span>
+                Browse
+            </button>
+        </div>
+
+        <!-- Homework footer -->
+        <div class="homework-footer" id="homeworkFooter" style="display:none">
+            <span class="homework-text" id="homeworkText"></span>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
