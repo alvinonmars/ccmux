@@ -56,6 +56,9 @@ TMP_DIR = HOUSEHOLD_DIR / "tmp"
 EMAIL_SCAN_DIR = TMP_DIR / "email_scan"
 GMAIL_SCAN_DIR = TMP_DIR / "gmail_scan"
 
+# Pad agent (KidPad)
+PAD_DIR = DATA_ROOT / "pad"
+
 # Security audit
 SECURITY_AUDIT_DIR = DATA_ROOT / "security_audit"
 
@@ -95,6 +98,7 @@ def ensure_dirs() -> None:
         TMP_DIR,
         EMAIL_SCAN_DIR,
         GMAIL_SCAN_DIR,
+        PAD_DIR,
         SECURITY_AUDIT_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)

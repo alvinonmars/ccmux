@@ -153,6 +153,28 @@ def _tmux_has_session(session: str) -> bool:
         return False
 
 
+def _claude_alive_in_session(session: str) -> bool:
+    """Check if a Claude Code process is running inside the tmux session."""
+    try:
+        result = subprocess.run(
+            ["tmux", "list-panes", "-t", session, "-F", "#{pane_pid}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return False
+        pane_pid = result.stdout.strip()
+        if not pane_pid:
+            return False
+        # Check if a `claude` process is a child of the pane shell
+        pstree = subprocess.run(
+            ["pstree", "-p", pane_pid],
+            capture_output=True, text=True, timeout=5,
+        )
+        return "claude(" in pstree.stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
 def _tmux_kill_session(session: str) -> None:
     """Kill an existing tmux session."""
     try:
@@ -396,52 +418,65 @@ class ProcessManager:
         env_vars["ZULIP_PROJECT_PATH"] = str(project_path)
         env_vars["ZULIP_SESSION_ID"] = session_id
 
-        # 5. Kill old tmux session if it exists (lazy create guard)
+        # 5. Handle existing tmux session
+        # If Claude is alive inside an existing session, reuse it.
+        # Killing + recreating triggers `claude --resume` which can compact
+        # the conversation, causing Claude to stop writing to the original
+        # JSONL file — breaking both transcript_watcher and Stop hook.
+        reuse_existing = False
         if _tmux_has_session(session):
-            log.warning("Killing existing tmux session: %s", session)
-            _tmux_kill_session(session)
-
-        # 6. Create tmux session with a shell, then send-keys to start Claude.
-        # Running claude as the tmux session command causes it to exit
-        # immediately (no interactive TTY from shell). Using send-keys
-        # gives claude a proper interactive shell environment.
-        tmux_cmd = [
-            "tmux", "new-session", "-d", "-s", session,
-            "-c", str(project_path),
-        ]
-        for k, v in env_vars.items():
-            tmux_cmd.extend(["-e", f"{k}={v}"])
-
-        try:
-            result = subprocess.run(tmux_cmd, capture_output=True, timeout=10)
-            if result.returncode != 0:
-                log.error(
-                    "tmux new-session failed (rc=%d): %s",
-                    result.returncode,
-                    result.stderr.decode(errors="replace").strip(),
+            if _claude_alive_in_session(session):
+                log.info(
+                    "Reusing existing tmux session: %s (Claude alive)", session
                 )
+                reuse_existing = True
+                create_mode = CreateMode.NONE  # No user-visible change
+            else:
+                log.warning("Killing existing tmux session: %s", session)
+                _tmux_kill_session(session)
+
+        if not reuse_existing:
+            # 6. Create tmux session with a shell, then send-keys to start Claude.
+            # Running claude as the tmux session command causes it to exit
+            # immediately (no interactive TTY from shell). Using send-keys
+            # gives claude a proper interactive shell environment.
+            tmux_cmd = [
+                "tmux", "new-session", "-d", "-s", session,
+                "-c", str(project_path),
+            ]
+            for k, v in env_vars.items():
+                tmux_cmd.extend(["-e", f"{k}={v}"])
+
+            try:
+                result = subprocess.run(tmux_cmd, capture_output=True, timeout=10)
+                if result.returncode != 0:
+                    log.error(
+                        "tmux new-session failed (rc=%d): %s",
+                        result.returncode,
+                        result.stderr.decode(errors="replace").strip(),
+                    )
+                    self._close_sentinel(key)
+                    return None
+            except subprocess.TimeoutExpired:
+                log.error("tmux new-session timed out for %s", session)
                 self._close_sentinel(key)
                 return None
-        except subprocess.TimeoutExpired:
-            log.error("tmux new-session timed out for %s", session)
-            self._close_sentinel(key)
-            return None
 
-        # 6b. Send claude command via send-keys (resume or new session)
-        # --strict-mcp-config: ignore project .mcp.json so Zulip instances
-        # don't inherit WhatsApp/other MCP servers from the shared project dir.
-        if create_mode == CreateMode.RESUMED:
-            claude_cmd = f"claude --resume {session_id} --dangerously-skip-permissions --strict-mcp-config"
-        else:
-            claude_cmd = f"claude --session-id {session_id} --dangerously-skip-permissions --strict-mcp-config"
-        try:
-            subprocess.run(
-                ["tmux", "send-keys", "-t", session, claude_cmd, "Enter"],
-                capture_output=True,
-                timeout=5,
-            )
-        except subprocess.TimeoutExpired:
-            log.warning("tmux send-keys timed out for %s", session)
+            # 6b. Send claude command via send-keys (resume or new session)
+            # --strict-mcp-config: ignore project .mcp.json so Zulip instances
+            # don't inherit WhatsApp/other MCP servers from the shared project dir.
+            if create_mode == CreateMode.RESUMED:
+                claude_cmd = f"claude --resume {session_id} --dangerously-skip-permissions --strict-mcp-config"
+            else:
+                claude_cmd = f"claude --session-id {session_id} --dangerously-skip-permissions --strict-mcp-config"
+            try:
+                subprocess.run(
+                    ["tmux", "send-keys", "-t", session, claude_cmd, "Enter"],
+                    capture_output=True,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                log.warning("tmux send-keys timed out for %s", session)
 
         # 7. Get pane PID and write to PID file
         try:

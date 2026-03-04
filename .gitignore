@@ -70,3 +70,6 @@ scripts/git_history_rewrite_plan.md
 commercial-discuss
 
 .zulip-uploads/
+
+# Security audit logs (contain infrastructure details)
+docs/security/

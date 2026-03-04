@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from adapters.zulip_adapter.transcript_watcher import (
+    MAX_STATUS_MESSAGE_CHARS,
     TranscriptWatcher,
     ZulipPoster,
     _extract_tool_uses,
@@ -177,10 +178,9 @@ class TestFormatToolStatus:
         result = _format_tool_status("Bash", {"command": "npm test"})
         assert "npm test" in result
 
-    def test_read_shows_filename_only(self):
+    def test_read_shows_full_path(self):
         result = _format_tool_status("Read", {"file_path": "/home/user/project/src/main.py"})
-        assert "main.py" in result
-        assert "/home/user" not in result
+        assert "/home/user/project/src/main.py" in result
 
     def test_edit(self):
         result = _format_tool_status("Edit", {"file_path": "/a/b/config.ts"})
@@ -200,11 +200,11 @@ class TestFormatToolStatus:
         assert "CustomTool" in result
         assert "\U0001f527" in result  # 🔧
 
-    def test_long_input_truncated(self):
+    def test_long_input_preserved(self):
+        """Long inputs are no longer truncated (message chaining handles overflow)."""
         long_cmd = "x" * 200
         result = _format_tool_status("Bash", {"command": long_cmd})
-        assert "..." in result
-        assert len(result) < 200
+        assert long_cmd in result
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +300,8 @@ class TestTranscriptWatcher:
         assert "ls" in call_args
 
     @pytest.mark.asyncio
-    async def test_ignores_tool_result(self, transcript_file, mock_poster):
+    async def test_shows_tool_result(self, transcript_file, mock_poster):
+        """Tool results are displayed in the status message."""
         watcher = TranscriptWatcher(
             transcript_file, mock_poster, poll_interval=0.1
         )
@@ -308,7 +309,6 @@ class TestTranscriptWatcher:
         task = asyncio.create_task(watcher.run())
         await asyncio.sleep(0.15)
 
-        # Append a tool_result (should be ignored)
         entry = json.dumps({
             "message": {
                 "role": "user",
@@ -324,8 +324,9 @@ class TestTranscriptWatcher:
         watcher.stop()
         await task
 
-        mock_poster.post.assert_not_called()
-        mock_poster.update.assert_not_called()
+        assert mock_poster.post.called
+        content = mock_poster.post.call_args[0][0]
+        assert "output here" in content
 
     @pytest.mark.asyncio
     async def test_ack_message_updated_not_new_post(
@@ -507,10 +508,10 @@ class TestTranscriptWatcher:
         assert "new" in content
 
     @pytest.mark.asyncio
-    async def test_assistant_text_shows_responding(
+    async def test_assistant_text_shows_content(
         self, transcript_file, mock_poster
     ):
-        """Assistant text-only messages produce a 'Responding...' status."""
+        """Assistant text-only messages show actual text content."""
         watcher = TranscriptWatcher(
             transcript_file, mock_poster, poll_interval=0.1
         )
@@ -535,7 +536,7 @@ class TestTranscriptWatcher:
 
         assert mock_poster.post.called
         content = mock_poster.post.call_args[0][0]
-        assert "Responding" in content
+        assert "Here is my analysis" in content
 
     @pytest.mark.asyncio
     async def test_stop_is_clean(self, transcript_file, mock_poster):
@@ -586,3 +587,92 @@ class TestTranscriptWatcher:
         # Should NOT have posted anything (pre-existing content ignored)
         mock_poster.post.assert_not_called()
         mock_poster.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_message_chaining_on_overflow(
+        self, transcript_file, mock_poster
+    ):
+        """When content exceeds MAX_STATUS_MESSAGE_CHARS, chain to new message."""
+        # Use incrementing message IDs for each post() call
+        msg_ids = iter(range(100, 200))
+        mock_poster.post.side_effect = lambda _: next(msg_ids)
+
+        watcher = TranscriptWatcher(
+            transcript_file, mock_poster, poll_interval=0.1
+        )
+
+        task = asyncio.create_task(watcher.run())
+        await asyncio.sleep(0.15)
+
+        # Generate enough tool calls to exceed MAX_STATUS_MESSAGE_CHARS
+        lines_needed = (MAX_STATUS_MESSAGE_CHARS // 40) + 5
+        entries = []
+        for i in range(lines_needed):
+            entries.append(json.dumps({
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Bash",
+                         "input": {"command": f"command-{i:04d}-{'x' * 20}"}}
+                    ],
+                }
+            }))
+        with open(transcript_file, "a") as f:
+            f.write("\n".join(entries) + "\n")
+
+        await asyncio.sleep(0.5)
+        watcher.stop()
+        await task
+
+        # Should have created multiple messages (chaining)
+        assert mock_poster.post.call_count >= 2, (
+            f"Expected chaining (>=2 posts), got {mock_poster.post.call_count}"
+        )
+
+        # All content should be preserved across the chain
+        all_content = ""
+        for call in mock_poster.post.call_args_list:
+            all_content += call[0][0] + "\n"
+        for call in mock_poster.update.call_args_list:
+            all_content += call[0][1] + "\n"
+
+        # Spot-check: first and last commands should appear somewhere
+        assert "command-0000" in all_content
+        assert f"command-{lines_needed - 1:04d}" in all_content
+
+    @pytest.mark.asyncio
+    async def test_single_oversized_line_handled(
+        self, transcript_file, mock_poster
+    ):
+        """A single line exceeding MAX_STATUS_MESSAGE_CHARS is hard-truncated at message level."""
+        mock_poster.post.return_value = 42
+
+        watcher = TranscriptWatcher(
+            transcript_file, mock_poster, poll_interval=0.1
+        )
+
+        task = asyncio.create_task(watcher.run())
+        await asyncio.sleep(0.15)
+
+        # Single tool call with a huge pattern (exceeds message limit)
+        huge_pattern = "x" * (MAX_STATUS_MESSAGE_CHARS + 500)
+        entry = json.dumps({
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "Grep",
+                     "input": {"pattern": huge_pattern}}
+                ],
+            }
+        })
+        with open(transcript_file, "a") as f:
+            f.write(entry + "\n")
+
+        await asyncio.sleep(0.3)
+        watcher.stop()
+        await task
+
+        # Should have posted — message-level truncation keeps it under limit
+        assert mock_poster.post.called
+        content = mock_poster.post.call_args[0][0]
+        assert len(content) <= MAX_STATUS_MESSAGE_CHARS

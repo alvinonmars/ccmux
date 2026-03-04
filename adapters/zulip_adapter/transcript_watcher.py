@@ -54,50 +54,48 @@ DEFAULT_EMOJI = "\U0001f527"       # 🔧
 
 
 def _format_tool_status(tool_name: str, tool_input: dict) -> str:
-    """Format a tool_use entry into a brief human-readable status line."""
+    """Format a tool_use entry into a human-readable status line.
+
+    No truncation — message chaining handles overflow at the message level.
+    """
     emoji = TOOL_EMOJI.get(tool_name, DEFAULT_EMOJI)
 
     if tool_name == "Bash":
         cmd = tool_input.get("command", "")
         desc = tool_input.get("description", "")
         display = desc if desc else cmd
-        if len(display) > MAX_INPUT_DISPLAY:
-            display = display[:MAX_INPUT_DISPLAY] + "..."
         return f"{emoji} Running: `{display}`"
 
     if tool_name == "Read":
         path = tool_input.get("file_path", "")
-        # Show only filename, not full path
-        short = Path(path).name if path else "?"
-        return f"{emoji} Reading: `{short}`"
+        return f"{emoji} Reading: `{path}`"
 
     if tool_name in ("Glob", "Grep"):
         pattern = tool_input.get("pattern", "")
-        return f"{emoji} Searching: `{pattern}`"
+        path = tool_input.get("path", "")
+        suffix = f" in `{path}`" if path else ""
+        return f"{emoji} Searching: `{pattern}`{suffix}"
 
     if tool_name == "Edit":
         path = tool_input.get("file_path", "")
-        short = Path(path).name if path else "?"
-        return f"{emoji} Editing: `{short}`"
+        return f"{emoji} Editing: `{path}`"
 
     if tool_name == "Write":
         path = tool_input.get("file_path", "")
-        short = Path(path).name if path else "?"
-        return f"{emoji} Writing: `{short}`"
+        return f"{emoji} Writing: `{path}`"
 
     if tool_name == "Agent":
         desc = tool_input.get("description", tool_input.get("prompt", ""))
-        if len(desc) > MAX_INPUT_DISPLAY:
-            desc = desc[:MAX_INPUT_DISPLAY] + "..."
         return f"{emoji} Agent: {desc}"
 
     if tool_name in ("WebSearch", "WebFetch"):
         query = tool_input.get("query", tool_input.get("url", ""))
-        if len(query) > MAX_INPUT_DISPLAY:
-            query = query[:MAX_INPUT_DISPLAY] + "..."
         return f"{emoji} Web: `{query}`"
 
-    # Generic fallback
+    # Generic fallback — show all input keys for transparency
+    if tool_input:
+        summary = json.dumps(tool_input, ensure_ascii=False)
+        return f"{emoji} {tool_name}: {summary}"
     return f"{emoji} {tool_name}"
 
 
@@ -131,32 +129,113 @@ def _extract_tool_uses(line: str) -> list[tuple[str, dict]]:
     return results
 
 
-def _is_assistant_text(line: str) -> bool:
-    """Return True if the line is an assistant message with text content (no tools)."""
+def _extract_assistant_text(line: str) -> str | None:
+    """Extract text content from an assistant message (no tool_use).
+
+    Returns the concatenated text blocks, or None if the line is not a
+    text-only assistant message.
+    """
     try:
         record = json.loads(line)
     except (json.JSONDecodeError, ValueError):
-        return False
+        return None
 
     msg = record.get("message", {})
     if msg.get("role") != "assistant":
-        return False
+        return None
 
     content = msg.get("content", [])
     if not isinstance(content, list):
-        return False
+        return None
 
-    has_text = False
+    texts: list[str] = []
     has_tool = False
     for block in content:
         if not isinstance(block, dict):
             continue
-        if block.get("type") == "text" and block.get("text", "").strip():
-            has_text = True
+        if block.get("type") == "text":
+            t = block.get("text", "").strip()
+            if t:
+                texts.append(t)
         if block.get("type") == "tool_use":
             has_tool = True
 
-    return has_text and not has_tool
+    if texts and not has_tool:
+        return "\n".join(texts)
+    return None
+
+
+def _extract_tool_results(line: str) -> list[str]:
+    """Extract tool result text from a transcript JSONL line.
+
+    Tool results appear as user messages with tool_result content blocks.
+    Returns a list of result text strings.
+    """
+    try:
+        record = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    msg = record.get("message", {})
+    if msg.get("role") != "user":
+        return []
+
+    content = msg.get("content", [])
+    if not isinstance(content, list):
+        return []
+
+    results = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") != "tool_result":
+            continue
+        # tool_result content can be a string or a list of blocks
+        rc = block.get("content", "")
+        if isinstance(rc, str) and rc.strip():
+            results.append(rc.strip())
+        elif isinstance(rc, list):
+            for sub in rc:
+                if isinstance(sub, dict) and sub.get("type") == "text":
+                    t = sub.get("text", "").strip()
+                    if t:
+                        results.append(t)
+    return results
+
+
+def _extract_thinking(line: str) -> str | None:
+    """Extract thinking block content from a transcript JSONL line.
+
+    Returns the thinking text, or None if not present.
+    """
+    try:
+        record = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    msg = record.get("message", {})
+    if msg.get("role") != "assistant":
+        return None
+
+    content = msg.get("content", [])
+    if not isinstance(content, list):
+        return None
+
+    thoughts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "thinking":
+            t = block.get("thinking", "").strip()
+            if t:
+                thoughts.append(t)
+
+    return "\n".join(thoughts) if thoughts else None
+
+
+def _is_assistant_text(line: str) -> bool:
+    """Return True if the line is an assistant message with text content (no tools)."""
+    return _extract_assistant_text(line) is not None
 
 
 class ZulipPoster:
@@ -235,6 +314,13 @@ class ZulipPoster:
                 result = json.loads(resp.read().decode())
             if result.get("result") == "success":
                 return result.get("id")
+        except urllib.request.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode(errors="replace")[:200]
+            except Exception:
+                pass
+            log.warning("Zulip post failed: %s body=%s", e, body)
         except Exception as e:
             log.warning("Zulip post failed: %s", e)
         return None
@@ -253,6 +339,14 @@ class ZulipPoster:
             with self._opener.open(req, timeout=10) as resp:
                 result = json.loads(resp.read().decode())
             return result.get("result") == "success"
+        except urllib.request.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode(errors="replace")[:200]
+            except Exception:
+                pass
+            log.warning("Zulip update failed: %s body=%s", e, body)
+            return False
         except Exception as e:
             log.warning("Zulip update failed: %s", e)
             return False
@@ -336,14 +430,36 @@ class TranscriptWatcher:
                 # Collect all status updates from this batch
                 batch_lines: list[str] = []
                 for line in new_lines:
+                    # Check for thinking blocks (Phase 5)
+                    thinking = _extract_thinking(line)
+                    if thinking:
+                        batch_lines.append(
+                            "\U0001f9e0 **Thinking:**\n" + thinking  # 🧠
+                        )
+
                     # Check for tool_use entries
                     tool_uses = _extract_tool_uses(line)
                     if tool_uses:
-                        # Batch all tools from a single assistant message together
                         for name, inp in tool_uses:
                             batch_lines.append(_format_tool_status(name, inp))
-                    elif _is_assistant_text(line):
-                        batch_lines.append("\U0001f4ac Responding...")  # 💬
+                        continue
+
+                    # Check for tool results (Phase 4)
+                    tool_results = _extract_tool_results(line)
+                    if tool_results:
+                        for result_text in tool_results:
+                            batch_lines.append(
+                                "\U0001f4e4 **Result:**\n"  # 📤
+                                + "```\n" + result_text + "\n```"
+                            )
+                        continue
+
+                    # Check for assistant text output (Phase 2)
+                    text = _extract_assistant_text(line)
+                    if text:
+                        batch_lines.append(
+                            "\U0001f4ac " + text  # 💬
+                        )
 
                 if batch_lines:
                     self._status_lines.extend(batch_lines)
@@ -379,27 +495,68 @@ class TranscriptWatcher:
         return lines
 
     async def _update_status_message(self) -> None:
-        """Update the single status message with all accumulated lines.
+        """Update status message, chaining to new messages when full.
 
-        Trims old lines when the accumulated content would exceed Zulip's
-        message size limit (~10K chars), keeping the most recent entries.
+        When the accumulated content exceeds Zulip's message size limit
+        (~10K chars), the current message is finalized and a new message
+        is created for subsequent status lines. This preserves all content
+        instead of discarding old lines.
         """
         content = "\n".join(self._status_lines)
-        if len(content) > MAX_STATUS_MESSAGE_CHARS:
-            # Keep newest lines, trim from the front
-            while len(content) > MAX_STATUS_MESSAGE_CHARS and len(self._status_lines) > 1:
-                self._status_lines.pop(0)
-                content = "\n".join(self._status_lines)
-            content = "...(earlier status trimmed)\n" + content
+
+        # If content fits, update the current message in place
+        if len(content) <= MAX_STATUS_MESSAGE_CHARS:
+            await self._post_or_update(content)
+            return
+
+        # Content exceeds limit — split: keep lines that fit in the
+        # current message, move the rest to a new message.
+        fitting_lines: list[str] = []
+        overflow_lines: list[str] = []
+        running_len = 0
+        split_done = False
+        for line in self._status_lines:
+            if not split_done:
+                # +1 for the newline separator
+                added_len = len(line) + (1 if fitting_lines else 0)
+                if running_len + added_len <= MAX_STATUS_MESSAGE_CHARS:
+                    fitting_lines.append(line)
+                    running_len += added_len
+                else:
+                    split_done = True
+                    overflow_lines.append(line)
+            else:
+                overflow_lines.append(line)
+
+        # If a single line exceeds the limit, hard-truncate it
+        if not fitting_lines and overflow_lines:
+            big_line = overflow_lines.pop(0)
+            fitting_lines.append(
+                big_line[:MAX_STATUS_MESSAGE_CHARS - 30] + "\n...(truncated)"
+            )
+
+        # Finalize the current message with fitting content
+        if fitting_lines:
+            await self._post_or_update("\n".join(fitting_lines))
+
+        # Chain: start a new message for overflow content
+        if overflow_lines:
+            self._status_msg_id = None  # Force new message
+            self._status_lines = overflow_lines
+            # Recursively handle overflow (may need further chaining)
+            await self._update_status_message()
+        else:
+            self._status_lines = fitting_lines
+
+    async def _post_or_update(self, content: str) -> None:
+        """Post a new message or update the existing one."""
         loop = asyncio.get_running_loop()
 
         if self._status_msg_id:
-            # Update existing message
             await loop.run_in_executor(
                 None, self.poster.update, self._status_msg_id, content,
             )
         else:
-            # No ACK was sent — create new message
             msg_id = await loop.run_in_executor(
                 None, self.poster.post, content,
             )

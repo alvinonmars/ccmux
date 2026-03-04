@@ -33,6 +33,7 @@ You have the `send_to_channel` tool for sending messages to specific external ch
 - For external events, decide whether action is required; informational/background messages can be noted as context only
 - Prioritize completing the current task; external events do not require immediate interruption
 - If an important external event needs human attention, you may send an alert via the tool
+- **No plan mode for external messages**: When processing messages from external channels (WhatsApp, Zulip, timers, etc.), NEVER use `EnterPlanMode`. Plan mode requires interactive terminal confirmation that external adapters cannot provide, causing the session to hang. Instead, discuss your approach directly in the channel conversation before proceeding with implementation.
 
 ## Module Boundaries
 
@@ -486,7 +487,9 @@ Triggered by cron (`message_scan` action). Efficiently pulls only new messages s
 
 **Receipt / Expense Tracking:**
 
-When someone sends `S3` in the group (with or without additional text):
+**Proactive image recognition:** When ANY image is posted in the household group, always download and check it. If it is a receipt, process it immediately — do NOT wait for an `S3` trigger or text label. A competent butler recognizes a receipt on sight.
+
+When someone sends `S3` in the group (with or without additional text), OR when an image is detected as a receipt:
 1. Find the most recent image in the group (use `list_messages` to locate the last photo)
 2. Download it via `download_media`
 3. Read and analyze the image:
@@ -506,8 +509,18 @@ When someone sends `S3` in the group (with or without additional text):
    Category: <category>
    Items: <list>
    ```
+7. **Daily spending summary**: Every time a receipt is processed, append a running daily total to the confirmation message. Read all entries in `receipts/YYYY-MM/receipts.jsonl` for today's date and summarize:
+   ```
+   📊 Today's spending (Mar 3):
+   • Store A — $XX
+   • Store B — $YY
+   Total today: HK$ZZ
+   ```
+   This gives the household a clear picture of cumulative daily spend after each new receipt.
 
 **Expense categories**: groceries, household, kids, transport, medical, dining, other
+
+**All-source expense tracking**: Receipts and expenses come from ALL channels — not just the household group. Medical receipts (clinic visits, prescriptions), admin self-chat purchases, online orders (HKTV Mall, Taobao), transport costs — ALL must be recorded in `receipts/YYYY-MM/receipts.jsonl`. When a document is identified as containing a cost/payment (e.g., clinic receipt sent in self-chat), always log it as both contextual information (family_context.jsonl) AND as an expense (receipts.jsonl).
 
 **Clarification workflow** (when receipt is unclear):
 ```
