@@ -741,32 +741,34 @@ class TestProcessMgr:
             assert mgr.is_alive("stream1", "topic1") is True
 
     def test_ac5_4_env_template_parsed(self, tmp_path: Path) -> None:
-        """AC-5.4: env_template.sh loaded correctly (non-placeholder vars)."""
+        """AC-5.4: env_template.sh loaded correctly (non-placeholder vars).
+
+        Proxy vars are NOT in env_template (they are inlined into the
+        claude command prefix by process_mgr). Only Zulip business vars.
+        """
         from adapters.zulip_adapter.process_mgr import _parse_env_template
 
         env_tpl = tmp_path / "env_template.sh"
         env_tpl.write_text(textwrap.dedent("""\
-            # Network proxy
-            export HTTP_PROXY=http://127.0.0.1:8118
-            export HTTPS_PROXY=http://127.0.0.1:8118
-            export NO_PROXY=localhost,127.0.0.1
-
             # Template variables (should be skipped)
             export ZULIP_STREAM=${STREAM_NAME}
             export ZULIP_TOPIC=${TOPIC_NAME}
 
             # Static Zulip vars
             export ZULIP_SITE=https://zulip.example.com
+            export ZULIP_BOT_EMAIL=bot@example.com
         """))
 
         env = _parse_env_template(env_tpl)
-        assert env["HTTP_PROXY"] == "http://127.0.0.1:8118"
-        assert env["HTTPS_PROXY"] == "http://127.0.0.1:8118"
-        assert env["NO_PROXY"] == "localhost,127.0.0.1"
         assert env["ZULIP_SITE"] == "https://zulip.example.com"
+        assert env["ZULIP_BOT_EMAIL"] == "bot@example.com"
         # Template placeholders should be skipped
         assert "ZULIP_STREAM" not in env
         assert "ZULIP_TOPIC" not in env
+        # Proxy vars must NOT be in env_template
+        assert "HTTP_PROXY" not in env
+        assert "HTTPS_PROXY" not in env
+        assert "NO_PROXY" not in env
 
     def test_ac5_5_tmux_session_name(self) -> None:
         """AC-5.5: tmux session name follows stream--topic format."""
@@ -2949,7 +2951,7 @@ class TestOutboundFileUpload:
             mock_resp.__enter__ = lambda s: s
             mock_resp.__exit__ = MagicMock(return_value=False)
 
-            with patch("urllib.request.urlopen", return_value=mock_resp):
+            with patch.object(hook._opener, "open", return_value=mock_resp):
                 result = hook._process_send_file_markers(
                     "Here is the file [send-file: output.txt]",
                     "https://zulip.test", "Basic abc"
@@ -3005,7 +3007,7 @@ class TestOutboundFileUpload:
             mock_resp.__enter__ = lambda s: s
             mock_resp.__exit__ = MagicMock(return_value=False)
 
-            with patch("urllib.request.urlopen", return_value=mock_resp):
+            with patch.object(hook._opener, "open", return_value=mock_resp):
                 result = hook._process_send_file_markers(
                     "[send-file: a.txt] and [send-file: b.txt]",
                     "https://zulip.test", "Basic abc"
@@ -3257,7 +3259,7 @@ class TestFileHandlerClosedLoop:
         upload_resp.__exit__ = MagicMock(return_value=False)
 
         with patch.dict(os.environ, {"ZULIP_PROJECT_PATH": str(project)}):
-            with patch("urllib.request.urlopen", return_value=upload_resp):
+            with patch.object(hook._opener, "open", return_value=upload_resp):
                 result = hook._process_send_file_markers(
                     "Here are the results: [send-file: result.csv]",
                     "https://zulip.test", "Basic abc"
@@ -3577,7 +3579,7 @@ class TestSessionResume:
     # -- Claude command flag tests --
 
     def test_claude_command_resume_flag(self, tmp_path: Path) -> None:
-        """RESUMED mode → tmux send-keys includes --resume."""
+        """RESUMED mode → tmux send-keys includes --resume + proxy prefix."""
         from adapters.zulip_adapter.process_mgr import (
             ProcessManager,
             _sanitize_name,
@@ -3604,7 +3606,8 @@ class TestSessionResume:
 
         with patch("adapters.zulip_adapter.process_mgr.subprocess") as mock_sub, \
              patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=False), \
-             patch("adapters.zulip_adapter.process_mgr._session_jsonl_exists", return_value=True):
+             patch("adapters.zulip_adapter.process_mgr._session_jsonl_exists", return_value=True), \
+             patch.object(mgr, "_read_claude_proxy", return_value="http://127.0.0.1:8118"):
             mock_sub.run.side_effect = mock_run
             mock_sub.TimeoutExpired = subprocess.TimeoutExpired
 
@@ -3618,9 +3621,11 @@ class TestSessionResume:
         cmd_str = send_keys_calls[0][4]  # The command string sent via send-keys
         assert "--resume resume-uuid" in cmd_str
         assert "--dangerously-skip-permissions" in cmd_str
+        # Proxy is inlined into the claude command, not in tmux session env
+        assert cmd_str.startswith("HTTP_PROXY=http://127.0.0.1:8118 HTTPS_PROXY=http://127.0.0.1:8118 claude")
 
     def test_claude_command_session_id_flag(self, tmp_path: Path) -> None:
-        """FIRST_TIME mode → tmux send-keys includes --session-id."""
+        """FIRST_TIME mode → tmux send-keys includes --session-id + proxy prefix."""
         from adapters.zulip_adapter.process_mgr import ProcessManager
 
         cfg = self._make_cfg(tmp_path)
@@ -3636,7 +3641,8 @@ class TestSessionResume:
 
         with patch("adapters.zulip_adapter.process_mgr.subprocess") as mock_sub, \
              patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=False), \
-             patch("adapters.zulip_adapter.process_mgr._session_jsonl_exists", return_value=False):
+             patch("adapters.zulip_adapter.process_mgr._session_jsonl_exists", return_value=False), \
+             patch.object(mgr, "_read_claude_proxy", return_value="http://127.0.0.1:8118"):
             mock_sub.run.side_effect = mock_run
             mock_sub.TimeoutExpired = subprocess.TimeoutExpired
 
@@ -3651,6 +3657,40 @@ class TestSessionResume:
         assert "--session-id" in cmd_str
         assert "--resume" not in cmd_str
         assert "--dangerously-skip-permissions" in cmd_str
+        assert cmd_str.startswith("HTTP_PROXY=")
+
+    def test_claude_command_no_proxy_when_unconfigured(self, tmp_path: Path) -> None:
+        """No proxy configured → claude command has no proxy prefix."""
+        from adapters.zulip_adapter.process_mgr import ProcessManager
+
+        cfg = self._make_cfg(tmp_path)
+        sc = self._make_stream_cfg(tmp_path)
+        mgr = ProcessManager(cfg)
+
+        send_keys_calls = []
+
+        def mock_run(cmd, **kwargs):
+            if cmd[0] == "tmux" and len(cmd) > 1 and cmd[1] == "send-keys":
+                send_keys_calls.append(cmd)
+            return MagicMock(returncode=0, stdout="12345", stderr=b"")
+
+        with patch("adapters.zulip_adapter.process_mgr.subprocess") as mock_sub, \
+             patch("adapters.zulip_adapter.process_mgr._tmux_has_session", return_value=False), \
+             patch("adapters.zulip_adapter.process_mgr._session_jsonl_exists", return_value=False), \
+             patch.object(mgr, "_read_claude_proxy", return_value=""):
+            mock_sub.run.side_effect = mock_run
+            mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(mgr._lazy_create("test-stream", "topic1", sc))
+            finally:
+                loop.close()
+
+        assert len(send_keys_calls) == 1
+        cmd_str = send_keys_calls[0][4]
+        assert cmd_str.startswith("claude ")
+        assert "HTTP_PROXY" not in cmd_str
 
     def test_session_id_in_env_vars(self, tmp_path: Path) -> None:
         """ZULIP_SESSION_ID env var set in tmux session."""

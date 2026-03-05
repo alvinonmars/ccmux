@@ -23,6 +23,7 @@ import base64
 import json
 import logging
 import os
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -366,20 +367,28 @@ class TranscriptWatcher:
         await task
     """
 
+    # How long without new data before checking for a continuation file
+    _STALE_CHECK_SECS = 30.0
+
     def __init__(
         self,
         transcript_path: str | Path,
         poster: ZulipPoster,
         *,
         poll_interval: float = POLL_INTERVAL,
+        project_path: str | Path | None = None,
+        session_id: str | None = None,
     ):
         self.transcript_path = Path(transcript_path)
         self.poster = poster
         self.poll_interval = poll_interval
+        self._project_path = Path(project_path) if project_path else None
+        self._session_id = session_id
         self._running = True
         self._offset = 0  # File position to read from
         self._status_msg_id: int | None = None  # Single status message to update
         self._status_lines: list[str] = []  # Accumulated status lines
+        self._last_growth_time: float = 0.0  # Last time the file grew
 
     def stop(self) -> None:
         """Signal the watcher to stop."""
@@ -403,6 +412,8 @@ class TranscriptWatcher:
         if self.transcript_path.exists():
             self._offset = self.transcript_path.stat().st_size
 
+        self._last_growth_time = time.monotonic()
+
         try:
             while self._running:
                 await asyncio.sleep(self.poll_interval)
@@ -412,7 +423,15 @@ class TranscriptWatcher:
 
                 current_size = self.transcript_path.stat().st_size
                 if current_size == self._offset:
-                    continue  # No new data
+                    # No new data — check for continuation file if stale
+                    if self._should_check_file_switch():
+                        switched = self._try_switch_file()
+                        if switched:
+                            current_size = self.transcript_path.stat().st_size
+                        else:
+                            continue
+                    else:
+                        continue
 
                 # File was truncated/replaced (new session) — reset to start
                 if current_size < self._offset:
@@ -421,6 +440,9 @@ class TranscriptWatcher:
                         current_size, self._offset,
                     )
                     self._offset = 0
+
+                # Record that the file is still growing
+                self._last_growth_time = time.monotonic()
 
                 # Read new lines
                 new_lines = self._read_new_lines()
@@ -494,6 +516,33 @@ class TranscriptWatcher:
                 lines.append(line)
         return lines
 
+    def _should_check_file_switch(self) -> bool:
+        """Return True if the file has been stale long enough to check for a switch."""
+        if not self._project_path or not self._session_id:
+            return False
+        return (time.monotonic() - self._last_growth_time) >= self._STALE_CHECK_SECS
+
+    def _try_switch_file(self) -> bool:
+        """Check if the session continued to a new transcript file.
+
+        Returns True if switched to a new file.
+        """
+        new_path = discover_transcript(
+            self._project_path, self._session_id
+        )
+        if new_path and new_path != self.transcript_path and new_path.exists():
+            log.info(
+                "Transcript file switched: %s -> %s",
+                self.transcript_path.name, new_path.name,
+            )
+            self.transcript_path = new_path
+            self._offset = 0  # Read from start of new file
+            self._last_growth_time = time.monotonic()
+            return True
+        # Reset timer to avoid re-scanning every poll
+        self._last_growth_time = time.monotonic()
+        return False
+
     async def _update_status_message(self) -> None:
         """Update status message, chaining to new messages when full.
 
@@ -564,6 +613,38 @@ class TranscriptWatcher:
                 self._status_msg_id = msg_id
 
 
+def _project_claude_dir(
+    project_path: str | Path,
+    claude_home: Path | None = None,
+) -> Path:
+    """Return the Claude projects directory for a given project path."""
+    project_path = Path(project_path).resolve()
+    project_hash = str(project_path).replace("/", "-")
+    return (claude_home or Path.home() / ".claude") / "projects" / project_hash
+
+
+def _read_session_id_from_jsonl(path: Path) -> str | None:
+    """Read the sessionId from the first few lines of a JSONL transcript."""
+    try:
+        with open(path, "r") as f:
+            for i, line in enumerate(f):
+                if i > 5:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    sid = entry.get("sessionId")
+                    if sid:
+                        return sid
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return None
+
+
 def discover_transcript(
     project_path: str | Path,
     session_id: str,
@@ -575,6 +656,10 @@ def discover_transcript(
     Claude Code stores transcripts at:
         ~/.claude/projects/-<path-with-dashes>/<session_id>.jsonl
 
+    When a session runs out of context and continues, Claude creates a new
+    JSONL file with a different UUID filename but the same sessionId inside.
+    This function finds the most recently modified file matching the session.
+
     Args:
         project_path: The project directory (used to derive Claude's project hash).
         session_id: The Claude session UUID.
@@ -583,17 +668,46 @@ def discover_transcript(
     Returns the path if it exists, or None. Does NOT fall back to other sessions
     to avoid accidentally watching the wrong transcript.
     """
-    project_path = Path(project_path).resolve()
-    # Claude's project hash: absolute path with / replaced by -
-    # e.g. /home/user/project → -home-user-project (leading / becomes -)
-    project_hash = str(project_path).replace("/", "-")
-    claude_dir = (claude_home or Path.home() / ".claude") / "projects" / project_hash
-    transcript = claude_dir / f"{session_id}.jsonl"
+    claude_dir = _project_claude_dir(project_path, claude_home)
 
+    # Fast path: direct filename match (most common case)
+    transcript = claude_dir / f"{session_id}.jsonl"
     if transcript.exists():
+        # Check if there's a newer continuation file
+        candidates = _find_session_files(claude_dir, session_id)
+        if candidates:
+            newest = max(candidates, key=lambda p: p.stat().st_mtime)
+            if newest != transcript:
+                log.info(
+                    "Session %s continued to new file: %s",
+                    session_id[:8], newest.name,
+                )
+                return newest
         return transcript
+
+    # Slow path: session may have continued — scan all JSONL files
+    candidates = _find_session_files(claude_dir, session_id)
+    if candidates:
+        newest = max(candidates, key=lambda p: p.stat().st_mtime)
+        log.info(
+            "Discovered continuation transcript for session %s: %s",
+            session_id[:8], newest.name,
+        )
+        return newest
 
     # Return the expected path even if it doesn't exist yet —
     # Claude may not have created it at startup time.
     # The watcher's run() loop handles non-existent files gracefully.
     return transcript
+
+
+def _find_session_files(claude_dir: Path, session_id: str) -> list[Path]:
+    """Find all JSONL files in claude_dir that contain the given sessionId."""
+    if not claude_dir.is_dir():
+        return []
+    candidates = []
+    for jsonl in claude_dir.glob("*.jsonl"):
+        sid = _read_session_id_from_jsonl(jsonl)
+        if sid == session_id:
+            candidates.append(jsonl)
+    return candidates

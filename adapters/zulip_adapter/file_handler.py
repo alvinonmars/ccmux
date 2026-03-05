@@ -1,10 +1,8 @@
 """File handling for the Zulip adapter.
 
 Pure functions for path validation, filename sanitization, attachment parsing,
-file download, and file upload. All file I/O is validated against a project
-base path to prevent path traversal and symlink escape.
-
-Uses stdlib only (no third-party dependencies).
+file download, file upload, and image preprocessing. All file I/O is validated
+against a project base path to prevent path traversal and symlink escape.
 """
 from __future__ import annotations
 
@@ -155,4 +153,80 @@ def upload_file(
         return None
     except Exception as e:
         log.warning("Upload failed (%s): %s", filepath, e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Image preprocessing — convert non-standard formats to JPEG for Claude
+# ---------------------------------------------------------------------------
+
+# Formats that need conversion (Claude cannot read these directly)
+IMAGE_EXTENSIONS_CONVERT = {".heic", ".heif", ".webp", ".tiff", ".tif", ".bmp"}
+# Formats Claude can already read (may still need resizing)
+VIEWABLE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif"}
+MAX_IMAGE_DIMENSION = 1920
+MAX_IMAGE_BYTES = 200_000  # 200KB — under Claude's 256KB Read tool limit
+JPEG_QUALITY_START = 85
+JPEG_QUALITY_MIN = 30
+
+
+def preprocess_image(path: Path) -> Path | None:
+    """Convert non-standard image formats to JPEG for Claude readability.
+
+    Returns the new path if converted/resized, None if no processing needed
+    or if conversion failed. Original file is preserved; converted file is
+    saved alongside with .jpg extension.
+    """
+    suffix = path.suffix.lower()
+    needs_convert = suffix in IMAGE_EXTENSIONS_CONVERT
+    needs_resize = suffix in VIEWABLE_EXTENSIONS and path.stat().st_size > MAX_IMAGE_BYTES
+
+    if not needs_convert and not needs_resize:
+        return None
+
+    try:
+        # Register HEIF opener before PIL.Image.open if needed
+        if suffix in {".heic", ".heif"}:
+            import pillow_heif
+            pillow_heif.register_heif_opener()
+
+        from PIL import Image
+
+        img = Image.open(path)
+
+        # Convert RGBA/palette to RGB for JPEG
+        if img.mode in ("RGBA", "P", "LA"):
+            img = img.convert("RGB")
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        # Resize if larger than max dimension
+        w, h = img.size
+        if max(w, h) > MAX_IMAGE_DIMENSION:
+            ratio = MAX_IMAGE_DIMENSION / max(w, h)
+            new_size = (int(w * ratio), int(h * ratio))
+            img = img.resize(new_size, Image.LANCZOS)
+
+        # Save as JPEG, iteratively reducing quality to fit size limit
+        out_path = path.with_suffix(".jpg")
+        quality = JPEG_QUALITY_START
+        while quality >= JPEG_QUALITY_MIN:
+            img.save(out_path, "JPEG", quality=quality)
+            if out_path.stat().st_size <= MAX_IMAGE_BYTES:
+                break
+            quality -= 10
+        else:
+            # Last attempt — further reduce dimensions
+            w, h = img.size
+            img = img.resize((w // 2, h // 2), Image.LANCZOS)
+            img.save(out_path, "JPEG", quality=JPEG_QUALITY_MIN)
+
+        log.info(
+            "Preprocessed image: %s → %s (%d bytes)",
+            path.name, out_path.name, out_path.stat().st_size,
+        )
+        return out_path
+
+    except Exception as e:
+        log.warning("Image preprocessing failed (%s): %s", path, e)
         return None

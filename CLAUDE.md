@@ -34,6 +34,7 @@ You have the `send_to_channel` tool for sending messages to specific external ch
 - Prioritize completing the current task; external events do not require immediate interruption
 - If an important external event needs human attention, you may send an alert via the tool
 - **No plan mode for external messages**: When processing messages from external channels (WhatsApp, Zulip, timers, etc.), NEVER use `EnterPlanMode`. Plan mode requires interactive terminal confirmation that external adapters cannot provide, causing the session to hang. Instead, discuss your approach directly in the channel conversation before proceeding with implementation.
+- **Architecture claims require code verification**: Never make architectural claims based on documentation or shallow searches. Before any architecture analysis or discussion: (1) Read actual source code, not just docs — spec describes design intent, code describes reality, they may have diverged. (2) Label every claim: "spec says" vs "code implements" vs "runtime verified". (3) When admin says "好像/I think", treat it as an unverified hypothesis — read code, give a definitive answer. (4) "grep found nothing" ≠ "not implemented" — check other paths, other module names, other forms. (5) If uncertain, say "I haven't verified this" — never fill gaps with assumptions for the sake of a smooth narrative.
 
 ## Module Boundaries
 

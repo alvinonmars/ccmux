@@ -418,6 +418,10 @@ class ProcessManager:
         env_vars["ZULIP_PROJECT_PATH"] = str(project_path)
         env_vars["ZULIP_SESSION_ID"] = session_id
 
+        # Proxy is NOT in env_vars (not in env_template.sh).
+        # It is only inlined into the claude command prefix (step 6b)
+        # so relay hooks and other child processes stay proxy-free.
+
         # 5. Handle existing tmux session
         # If Claude is alive inside an existing session, reuse it.
         # Killing + recreating triggers `claude --resume` which can compact
@@ -465,10 +469,14 @@ class ProcessManager:
             # 6b. Send claude command via send-keys (resume or new session)
             # --strict-mcp-config: ignore project .mcp.json so Zulip instances
             # don't inherit WhatsApp/other MCP servers from the shared project dir.
+            #
+            # Proxy is inlined as a command prefix (same pattern as daemon.py)
+            # so only the claude process uses it — not the tmux session env.
+            proxy_prefix = self._proxy_prefix()
             if create_mode == CreateMode.RESUMED:
-                claude_cmd = f"claude --resume {session_id} --dangerously-skip-permissions --strict-mcp-config"
+                claude_cmd = f"{proxy_prefix}claude --resume {session_id} --dangerously-skip-permissions --strict-mcp-config"
             else:
-                claude_cmd = f"claude --session-id {session_id} --dangerously-skip-permissions --strict-mcp-config"
+                claude_cmd = f"{proxy_prefix}claude --session-id {session_id} --dangerously-skip-permissions --strict-mcp-config"
             try:
                 subprocess.run(
                     ["tmux", "send-keys", "-t", session, claude_cmd, "Enter"],
@@ -545,6 +553,38 @@ class ProcessManager:
 
         log.info("Instance ready: stream=%s topic=%s mode=%s", stream, topic, create_mode.value)
         return fifo, create_mode
+
+    def _proxy_prefix(self) -> str:
+        """Return 'HTTP_PROXY=... HTTPS_PROXY=... ' command prefix.
+
+        Reads [claude].proxy from ccmux.toml (same source as daemon.py).
+        Returns empty string if no proxy is configured.
+        """
+        proxy = self._read_claude_proxy()
+        if proxy:
+            return f"HTTP_PROXY={proxy} HTTPS_PROXY={proxy} "
+        return ""
+
+    def _read_claude_proxy(self) -> str:
+        """Read [claude].proxy from ccmux.toml."""
+        toml_path = Path(__file__).resolve().parent.parent.parent / "ccmux.toml"
+        if not toml_path.exists():
+            return ""
+        try:
+            import sys
+            if sys.version_info >= (3, 11):
+                import tomllib
+            else:
+                try:
+                    import tomllib  # type: ignore[import]
+                except ModuleNotFoundError:
+                    import tomli as tomllib  # type: ignore[no-redef]
+            with open(toml_path, "rb") as f:
+                data = tomllib.load(f)
+            return data.get("claude", {}).get("proxy", "")
+        except Exception as e:
+            log.warning("Failed to read claude proxy from ccmux.toml: %s", e)
+            return ""
 
     def _read_api_key(self) -> str:
         """Read Zulip bot API key from the credentials file."""

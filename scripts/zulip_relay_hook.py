@@ -20,6 +20,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+# Bypass system proxy — Zulip is always a local service.
+# Defense in depth: even if HTTP_PROXY is set in the environment,
+# relay hook traffic must never transit through a proxy.
+_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 # Matches [send-file: path/to/file] markers in Claude output
 SEND_FILE_RE = re.compile(r"\[send-file:\s*([^\]]+)\]")
 
@@ -61,7 +66,7 @@ def _upload_file(site: str, cred: str, filepath: Path) -> str | None:
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
 
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with _opener.open(req, timeout=60) as resp:
             result = json.loads(resp.read().decode())
         if result.get("result") == "success":
             return result.get("uri", "")
@@ -98,6 +103,9 @@ def _process_send_file_markers(content: str, site: str, cred: str) -> str:
             return ""
         uri = _upload_file(site, cred, resolved)
         if uri:
+            image_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+            if resolved.suffix.lower() in image_exts:
+                return f"![{resolved.name}]({uri})"
             return f"[{resolved.name}]({uri})"
         return ""
 
@@ -181,7 +189,7 @@ def main() -> None:
         req.add_header("Authorization", f"Basic {cred}")
         req.add_header("Content-Type", "application/x-www-form-urlencoded")
         try:
-            urllib.request.urlopen(req, timeout=10)
+            _opener.open(req, timeout=10)
         except Exception as e:
             print(f"zulip_relay_hook: post failed: {e}", file=sys.stderr)
 

@@ -246,6 +246,61 @@ class TestDiscoverTranscript:
         assert result is not None
         assert result.name == "abc-123.jsonl"
 
+    def test_continuation_file_found(self, tmp_path):
+        """When session continued to a new file, discover the newest one."""
+        import time as _time
+
+        claude_home = tmp_path / ".claude"
+        projects_dir = claude_home / "projects" / "-home-user-project"
+        projects_dir.mkdir(parents=True)
+
+        session_id = "original-session-id"
+
+        # Original file (older)
+        original = projects_dir / f"{session_id}.jsonl"
+        original.write_text(
+            json.dumps({"type": "user", "sessionId": session_id}) + "\n"
+        )
+
+        # Ensure continuation file has a newer mtime
+        _time.sleep(0.05)
+
+        # Continuation file (newer, different UUID filename, same sessionId)
+        continuation = projects_dir / "new-uuid-file.jsonl"
+        continuation.write_text(
+            json.dumps({"type": "user", "sessionId": session_id}) + "\n"
+        )
+
+        result = discover_transcript(
+            "/home/user/project", session_id, claude_home=claude_home
+        )
+        assert result == continuation
+
+    def test_continuation_ignores_other_sessions(self, tmp_path):
+        """Continuation scan should not match files from other sessions."""
+        claude_home = tmp_path / ".claude"
+        projects_dir = claude_home / "projects" / "-home-user-project"
+        projects_dir.mkdir(parents=True)
+
+        session_id = "target-session"
+
+        # Original file for our session
+        original = projects_dir / f"{session_id}.jsonl"
+        original.write_text(
+            json.dumps({"type": "user", "sessionId": session_id}) + "\n"
+        )
+
+        # Another session's file (should not be matched)
+        other = projects_dir / "other-session.jsonl"
+        other.write_text(
+            json.dumps({"type": "user", "sessionId": "different-session"}) + "\n"
+        )
+
+        result = discover_transcript(
+            "/home/user/project", session_id, claude_home=claude_home
+        )
+        assert result == original
+
 
 # ---------------------------------------------------------------------------
 # TranscriptWatcher
