@@ -318,13 +318,18 @@ class TestInjector:
         assert injector._running is True
 
     def test_ac3_prompt_detection(self) -> None:
-        """AC-3: Claude prompt pattern matches ❯."""
+        """AC-3: Claude prompt pattern matches bare ❯ on its own line."""
         from adapters.zulip_adapter.injector import CLAUDE_PROMPT_RE, SHELL_PROMPT_RE
 
-        # Claude prompt
+        # Claude prompt — bare ❯ on a line
         assert CLAUDE_PROMPT_RE.search("some output\n❯ ")
         assert CLAUDE_PROMPT_RE.search("❯")
         assert CLAUDE_PROMPT_RE.search("text\n❯  ")
+        assert CLAUDE_PROMPT_RE.search("  ❯  ")  # with leading whitespace
+
+        # NOT a prompt — ❯ with text after it (queued message display)
+        assert not CLAUDE_PROMPT_RE.search("❯ Press up to edit queued messages")
+        assert not CLAUDE_PROMPT_RE.search("❯ some queued text here")
 
         # Shell prompt
         assert SHELL_PROMPT_RE.search("user@host:~$ ")
@@ -368,6 +373,40 @@ class TestInjector:
             mock_activity.return_value = time.time() - 10
             mock_capture.return_value = "Working on something..."
             assert gate.is_ready() is False
+
+    def test_injection_gate_ready_with_multiline_status_bar(self) -> None:
+        """is_ready() detects prompt when Claude has a 3-4 line status bar."""
+        from adapters.zulip_adapter.injector import InjectionGate
+
+        gate = InjectionGate("test-session")
+
+        # Simulate Claude TUI with 3-line status bar (prompt at position -4)
+        pane_3line_status = (
+            "Some output\n"
+            "❯ \n"
+            "─────────────────────────\n"
+            "  ⏵⏵ bypass permissions…\n"
+            "  Context left: 2%\n"
+        )
+        # Simulate 4-line status bar (prompt at position -5)
+        pane_4line_status = (
+            "Some output\n"
+            "❯ \n"
+            "─────────────────────────\n"
+            "  ⏵⏵ bypass permissions…\n"
+            "  Context left: 2%\n"
+            "  cost: $1.23\n"
+        )
+
+        with patch("adapters.zulip_adapter.injector._tmux_client_activity") as mock_activity, \
+             patch("adapters.zulip_adapter.injector._tmux_capture") as mock_capture:
+            mock_activity.return_value = time.time() - 10  # idle
+
+            mock_capture.return_value = pane_3line_status
+            assert gate.is_ready() is True, "Should detect prompt with 3-line status bar"
+
+            mock_capture.return_value = pane_4line_status
+            assert gate.is_ready() is True, "Should detect prompt with 4-line status bar"
 
     def test_ac3_7_claude_dead_detection(self) -> None:
         """AC-3.7: Shell prompt without Claude prompt → Claude exited."""
@@ -1792,13 +1831,15 @@ class TestClosedLoopScenarios:
             os.close(sentinel_fd)
 
     def test_first_message_session_started_notification(self, tmp_path: Path) -> None:
-        """Scenario 2: First message to new topic → 'Session started' posted to Zulip.
+        """Scenario 2: First message to new topic → 'Session started' posted,
+        recovery task scheduled (no direct FIFO write).
 
-        is_alive() returns False → _post_message called with session notification.
+        For new sessions, the adapter defers message delivery to the
+        recovery task which fetches unprocessed messages from Zulip API
+        after Claude's TUI is ready.
         """
         root, adapter = self._make_env(tmp_path)
 
-        # Pre-create FIFO for the write to succeed
         runtime = adapter.cfg.runtime_dir / "dev-project" / "new-topic"
         runtime.mkdir(parents=True)
         fifo = runtime / "in.zulip"
@@ -1810,24 +1851,33 @@ class TestClosedLoopScenarios:
         try:
             with patch.object(adapter.process_mgr, "ensure_instance", return_value=(fifo, CreateMode.FIRST_TIME)), \
                  patch.object(adapter, "_post_message") as mock_post, \
+                 patch.object(adapter, "_recover_pending_messages") as mock_recover, \
                  patch("adapters.zulip_adapter.adapter.scan_streams"):
 
                 loop = asyncio.new_event_loop()
                 try:
                     loop.run_until_complete(adapter._handle_message(event))
+                    # Let the scheduled recovery task start (but it's mocked)
+                    loop.run_until_complete(asyncio.sleep(0))
                 finally:
                     loop.close()
 
-            # Session started notification sent to correct stream+topic
+            # Session started notification sent
             mock_post.assert_called_once()
             args = mock_post.call_args[0]
             assert args[0] == "dev-project"
             assert args[1] == "new-topic"
             assert "Session started" in args[2]
 
-            # Message also written to FIFO
-            data = os.read(sentinel_fd, 4096)
-            assert b"hello world" in data
+            # Recovery task was scheduled (not direct FIFO write)
+            mock_recover.assert_called_once()
+
+            # No data written directly to FIFO
+            try:
+                data = os.read(sentinel_fd, 4096)
+            except BlockingIOError:
+                data = b""
+            assert data == b""
         finally:
             os.close(sentinel_fd)
 
@@ -2186,6 +2236,8 @@ class TestClosedLoopScenarios:
         injector = Injector("/tmp/test.fifo", "test-session")
         # Pre-load queue with multiple messages
         injector._queue = ["msg1", "msg2", "msg3"]
+        # Skip startup settle delay — simulate warmed-up session
+        injector._first_inject_done = True
 
         def inject_and_stop(session, text):
             """Capture the inject call and stop the loop."""
@@ -2211,6 +2263,264 @@ class TestClosedLoopScenarios:
         mock_inject.assert_called_once_with("test-session", "msg1\n---\nmsg2\n---\nmsg3")
         # Queue should be cleared after successful injection
         assert injector._queue == []
+
+    def test_first_inject_settle_delay(self) -> None:
+        """First injection is deferred until FIRST_INJECT_SETTLE seconds elapse.
+
+        Claude's TUI shows the prompt before its input handler is ready.
+        Injecting too early causes the text to be silently dropped.
+        """
+        from adapters.zulip_adapter import injector as inj_mod
+        from adapters.zulip_adapter.injector import Injector, FIRST_INJECT_SETTLE
+
+        injector = Injector("/tmp/test.fifo", "test-session")
+        injector._queue = ["hello"]
+        # Simulate just-started injector (start_time = now)
+
+        call_count = 0
+        inject_called_at: float | None = None
+
+        def inject_and_stop(session, text):
+            nonlocal inject_called_at
+            inject_called_at = time.monotonic()
+            injector._running = False
+            return True
+
+        # is_ready returns True immediately, but inject should be delayed
+        # Gate returns NOT ready for first call (the prompt appeared after
+        # settle), then ready on subsequent calls.  Simulate by making
+        # is_ready always True and relying on the settle guard.
+        with patch.object(inj_mod, "_inject_text", side_effect=inject_and_stop), \
+             patch.object(inj_mod, "_tmux_has_session", return_value=True), \
+             patch.object(injector.gate, "is_ready", return_value=True), \
+             patch.object(injector.gate, "is_claude_dead", return_value=False), \
+             patch("os.open", return_value=99), \
+             patch("os.read", side_effect=BlockingIOError), \
+             patch("os.close"):
+
+            start = time.monotonic()
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(injector.run())
+            finally:
+                loop.close()
+
+        # Injection should have been delayed by at least FIRST_INJECT_SETTLE
+        assert inject_called_at is not None
+        elapsed = inject_called_at - start
+        assert elapsed >= FIRST_INJECT_SETTLE - 0.5, (
+            f"First injection fired too early: {elapsed:.1f}s < {FIRST_INJECT_SETTLE}s"
+        )
+
+    def test_first_inject_marks_done_after_success(self) -> None:
+        """After first successful injection, _first_inject_done is set."""
+        from adapters.zulip_adapter import injector as inj_mod
+        from adapters.zulip_adapter.injector import Injector
+
+        injector = Injector("/tmp/test.fifo", "test-session")
+        injector._queue = ["hello"]
+        # Skip settle delay by backdating start time
+        injector._start_time = time.monotonic() - 60
+
+        def inject_and_stop(session, text):
+            injector._running = False
+            return True
+
+        with patch.object(inj_mod, "_inject_text", side_effect=inject_and_stop), \
+             patch.object(inj_mod, "_tmux_has_session", return_value=True), \
+             patch.object(injector.gate, "is_ready", return_value=True), \
+             patch.object(injector.gate, "is_claude_dead", return_value=False), \
+             patch("os.open", return_value=99), \
+             patch("os.read", side_effect=BlockingIOError), \
+             patch("os.close"):
+
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(injector.run())
+            finally:
+                loop.close()
+
+        assert injector._first_inject_done is True
+        assert injector._queue == []
+
+    def test_transcript_delivery_verification(self, tmp_path: Path) -> None:
+        """Injection enters verification phase when transcript_path is set.
+
+        After _inject_text succeeds, the injector polls the transcript for
+        a user message before clearing the queue.
+        """
+        from adapters.zulip_adapter import injector as inj_mod
+        from adapters.zulip_adapter.injector import Injector
+
+        transcript = tmp_path / "transcript.jsonl"
+        # Create transcript with some initial content
+        transcript.write_text('{"type":"init"}\n')
+        initial_size = transcript.stat().st_size
+
+        injector = Injector(
+            "/tmp/test.fifo", "test-session",
+            transcript_path=str(transcript),
+        )
+        injector._queue = ["hello"]
+        injector._first_inject_done = True  # Skip settle delay
+
+        inject_call_count = 0
+
+        def inject_side_effect(session, text):
+            nonlocal inject_call_count
+            inject_call_count += 1
+            # After first injection, simulate Claude writing user message
+            # to transcript (delivery confirmation)
+            entry = json.dumps({
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": text}],
+                }
+            })
+            with open(transcript, "a") as f:
+                f.write(entry + "\n")
+            return True
+
+        loop_count = 0
+
+        def check_and_stop(*args, **kwargs):
+            nonlocal loop_count
+            loop_count += 1
+            # Give enough iterations for inject + verify
+            if loop_count > 5:
+                injector._running = False
+            return True
+
+        with patch.object(inj_mod, "_inject_text", side_effect=inject_side_effect), \
+             patch.object(inj_mod, "_tmux_has_session", side_effect=check_and_stop), \
+             patch.object(injector.gate, "is_ready", return_value=True), \
+             patch.object(injector.gate, "is_claude_dead", return_value=False), \
+             patch("os.open", return_value=99), \
+             patch("os.read", side_effect=BlockingIOError), \
+             patch("os.close"):
+
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(injector.run())
+            finally:
+                loop.close()
+
+        assert inject_call_count == 1
+        assert injector._queue == []
+        assert injector._first_inject_done is True
+        assert injector._verify_pending is False
+
+    def test_transcript_verification_retry_on_timeout(self, tmp_path: Path) -> None:
+        """When transcript verification times out, injection is retried."""
+        from adapters.zulip_adapter import injector as inj_mod
+        from adapters.zulip_adapter.injector import Injector
+
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text('{"type":"init"}\n')
+
+        injector = Injector(
+            "/tmp/test.fifo", "test-session",
+            transcript_path=str(transcript),
+        )
+        injector._queue = ["hello"]
+        injector._first_inject_done = True
+
+        inject_count = 0
+
+        def inject_noop(session, text):
+            nonlocal inject_count
+            inject_count += 1
+            # Don't write to transcript — simulate failed delivery
+            return True
+
+        loop_count = 0
+
+        def check_and_stop(*args, **kwargs):
+            nonlocal loop_count
+            loop_count += 1
+            if loop_count > 3:
+                injector._running = False
+            return True
+
+        with patch.object(inj_mod, "_inject_text", side_effect=inject_noop), \
+             patch.object(inj_mod, "_tmux_has_session", side_effect=check_and_stop), \
+             patch.object(injector.gate, "is_ready", return_value=True), \
+             patch.object(injector.gate, "is_claude_dead", return_value=False), \
+             patch("os.open", return_value=99), \
+             patch("os.read", side_effect=BlockingIOError), \
+             patch("os.close"), \
+             patch.object(inj_mod, "DELIVERY_VERIFY_TIMEOUT", 0):  # Instant timeout
+
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(injector.run())
+            finally:
+                loop.close()
+
+        # Should have injected at least once, then verification timed out
+        assert inject_count >= 1
+        assert injector._inject_failures >= 1
+        assert injector._verify_pending is False
+
+    def test_no_transcript_skips_verification(self) -> None:
+        """Without transcript_path, injection clears queue immediately."""
+        from adapters.zulip_adapter import injector as inj_mod
+        from adapters.zulip_adapter.injector import Injector
+
+        injector = Injector("/tmp/test.fifo", "test-session")
+        assert injector.transcript_path is None
+
+        injector._queue = ["hello"]
+        injector._first_inject_done = True
+
+        def inject_and_stop(session, text):
+            injector._running = False
+            return True
+
+        with patch.object(inj_mod, "_inject_text", side_effect=inject_and_stop), \
+             patch.object(inj_mod, "_tmux_has_session", return_value=True), \
+             patch.object(injector.gate, "is_ready", return_value=True), \
+             patch.object(injector.gate, "is_claude_dead", return_value=False), \
+             patch("os.open", return_value=99), \
+             patch("os.read", side_effect=BlockingIOError), \
+             patch("os.close"):
+
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(injector.run())
+            finally:
+                loop.close()
+
+        assert injector._queue == []
+        assert injector._verify_pending is False
+
+    def test_prompt_false_positive_rejected(self) -> None:
+        """is_ready() rejects ❯ with text after it (queued message display)."""
+        from adapters.zulip_adapter.injector import InjectionGate
+
+        gate = InjectionGate("test-session")
+
+        with patch("adapters.zulip_adapter.injector._tmux_client_activity") as mock_activity, \
+             patch("adapters.zulip_adapter.injector._tmux_capture") as mock_capture:
+            mock_activity.return_value = time.time() - 10  # idle
+
+            # Queued message display — should NOT match
+            mock_capture.return_value = (
+                "Some output\n"
+                "❯ Press up to edit queued messages\n"
+            )
+            assert gate.is_ready() is False
+
+            # Queued text display — should NOT match
+            mock_capture.return_value = (
+                "Some output\n"
+                "❯ [25/03/05 09:11 From zulip] hello\n"
+            )
+            assert gate.is_ready() is False
+
+            # Actual empty prompt — should match
+            mock_capture.return_value = "Some output\n❯ \n"
+            assert gate.is_ready() is True
 
     def test_existing_code_unchanged(self) -> None:
         """AC-8.1: No modifications to ccmux/ or adapters/wa_notifier/."""
@@ -3407,8 +3717,8 @@ class TestSessionResume:
         finally:
             os.close(sentinel_fd)
 
-    def test_fallback_notification_and_history(self, tmp_path: Path) -> None:
-        """FALLBACK → notification + history fetched + injected via FIFO."""
+    def test_fallback_notification_and_recovery(self, tmp_path: Path) -> None:
+        """FALLBACK → notification posted + recovery task scheduled."""
         adapter = self._make_adapter(tmp_path)
 
         fifo = tmp_path / "runtime" / "test-stream" / "topic" / "in.zulip"
@@ -3418,55 +3728,27 @@ class TestSessionResume:
 
         event = self._zulip_event("test-stream", "topic", "hello")
 
-        history_messages = [
-            {
-                "sender_full_name": "Alice",
-                "sender_email": "alice@test.com",
-                "content": "first message",
-                "timestamp": 1709424000,
-            },
-            {
-                "sender_full_name": "Bob",
-                "sender_email": "bob@test.com",
-                "content": "second message",
-                "timestamp": 1709424060,
-            },
-        ]
-
-        fifo_writes = []
-
         try:
             with patch.object(
                 adapter.process_mgr, "ensure_instance",
                 return_value=(fifo, CreateMode.FALLBACK),
             ), \
                  patch.object(adapter, "_post_message") as mock_post, \
-                 patch.object(
-                     adapter, "_fetch_topic_history", return_value=history_messages
-                 ), \
-                 patch.object(
-                     adapter, "_write_to_fifo",
-                     side_effect=lambda p, m: (fifo_writes.append(m), True)[-1],
-                 ), \
+                 patch.object(adapter, "_recover_pending_messages") as mock_recover, \
                  patch("adapters.zulip_adapter.adapter.scan_streams"):
                 loop = asyncio.new_event_loop()
                 try:
                     loop.run_until_complete(adapter._handle_message(event))
+                    loop.run_until_complete(asyncio.sleep(0))
                 finally:
                     loop.close()
 
-            # Two notifications: "Recovering..." and "Recovered N message(s)"
-            assert mock_post.call_count == 2
-            first_msg = mock_post.call_args_list[0][0][2]
-            second_msg = mock_post.call_args_list[1][0][2]
-            assert "Recovering context" in first_msg
-            assert "Recovered 2 message(s)" in second_msg
+            # "Recovering context..." notification posted
+            mock_post.assert_called_once()
+            assert "Recovering context" in mock_post.call_args[0][2]
 
-            # History context injected via FIFO (first write), then the real message
-            assert len(fifo_writes) == 2
-            assert "[Context recovery]" in fifo_writes[0]
-            assert "Alice" in fifo_writes[0]
-            assert "hello" in fifo_writes[1]
+            # Recovery task scheduled (handles history fetch + FIFO write)
+            mock_recover.assert_called_once()
         finally:
             os.close(sentinel_fd)
 

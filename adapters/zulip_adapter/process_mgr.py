@@ -496,7 +496,10 @@ class ProcessManager:
         except (subprocess.TimeoutExpired, OSError) as e:
             log.warning("Failed to get pane PID: %s", e)
 
-        # 8. Start FIFO injector as an asyncio task
+        # 8. Discover transcript path (used by both injector and watcher)
+        transcript_path = discover_transcript(project_path, session_id)
+
+        # 9. Start FIFO injector as an asyncio task
         key = f"{stream}/{topic}"
         # Stop existing injector if any — clear pid_file first to prevent
         # the old injector's finally block from deleting the new PID file
@@ -506,19 +509,20 @@ class ProcessManager:
         if key in self._injector_tasks:
             self._injector_tasks[key].cancel()
 
-        injector = Injector(str(fifo), session, pid_file=str(pf))
+        injector = Injector(
+            str(fifo), session, pid_file=str(pf),
+            transcript_path=str(transcript_path) if transcript_path else None,
+        )
         self._injectors[key] = injector
         self._injector_tasks[key] = asyncio.create_task(
             injector.run(), name=f"injector-{key}"
         )
 
-        # 9. Start transcript watcher for real-time Zulip status updates
+        # 10. Start transcript watcher for real-time Zulip status updates
         if key in self._watchers:
             self._watchers[key].stop()
         if key in self._watcher_tasks:
             self._watcher_tasks[key].cancel()
-
-        transcript_path = discover_transcript(project_path, session_id)
         if transcript_path:
             poster = ZulipPoster(
                 site=env_vars.get("ZULIP_SITE", ""),
@@ -528,7 +532,11 @@ class ProcessManager:
                 topic=topic,
             )
             if poster.site:
-                watcher = TranscriptWatcher(transcript_path, poster)
+                watcher = TranscriptWatcher(
+                    transcript_path, poster,
+                    project_path=project_path,
+                    session_id=session_id,
+                )
                 self._watchers[key] = watcher
                 self._watcher_tasks[key] = asyncio.create_task(
                     watcher.run(), name=f"watcher-{key}"

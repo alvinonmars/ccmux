@@ -8,12 +8,14 @@ Simpler than the main ccmux daemon — no output broadcast, no control.sock.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +24,12 @@ IDLE_THRESHOLD = 5.0  # seconds of terminal idle before injecting
 POLL_INTERVAL = 1.0  # seconds between ready-state checks
 SEND_KEYS_TIMEOUT = 10  # seconds
 
+# Claude's TUI shows the ❯ prompt before its input handler is fully
+# initialized.  If we inject during that window the text is silently
+# dropped.  Wait at least this many seconds after start before the
+# first injection attempt.
+FIRST_INJECT_SETTLE = 5.0
+
 # tmux send-keys has a text length limit (~2KB safe). Beyond this, use
 # load-buffer + paste-buffer which has no practical limit.
 SEND_KEYS_MAX_BYTES = 2048
@@ -29,8 +37,14 @@ SEND_KEYS_MAX_BYTES = 2048
 # Maximum consecutive injection failures before discarding the message batch.
 MAX_INJECT_RETRIES = 5
 
-# Claude Code prompt pattern (❯ character, possibly followed by hint text)
-CLAUDE_PROMPT_RE = re.compile(r"❯", re.MULTILINE)
+# Delivery verification: after injection, poll transcript for confirmation.
+DELIVERY_VERIFY_TIMEOUT = 15.0  # seconds to wait for transcript confirmation
+DELIVERY_VERIFY_POLL = 2.0  # seconds between transcript checks
+
+# Claude Code prompt pattern — bare ❯ on a line by itself (with optional
+# whitespace).  This avoids false positives from "❯ Press up to edit queued
+# messages" or "❯ [queued text]" which appear when Claude is processing.
+CLAUDE_PROMPT_RE = re.compile(r"^\s*❯\s*$", re.MULTILINE)
 # Shell prompt patterns (Claude has exited)
 SHELL_PROMPT_RE = re.compile(r"[\$#]\s*$", re.MULTILINE)
 
@@ -199,10 +213,12 @@ class InjectionGate:
         if not pane:
             return False
 
-        # Only check the last 3 non-empty lines for the prompt.
-        # Old ❯ prompts in scrollback should not count as "ready".
+        # Only check the last 6 non-empty lines for the prompt.
+        # Claude's TUI status bar can be up to 4 lines (separator + info),
+        # pushing ❯ to position -4 or -5.  6 lines catches this while still
+        # avoiding old prompts in scrollback (typically 10+ lines up).
         lines = [ln for ln in pane.splitlines() if ln.strip()]
-        tail = "\n".join(lines[-3:]) if lines else ""
+        tail = "\n".join(lines[-6:]) if lines else ""
         if CLAUDE_PROMPT_RE.search(tail):
             return True
 
@@ -226,18 +242,89 @@ class Injector:
     # Grace period before checking is_claude_dead() — Claude needs ~2-3s to start
     STARTUP_GRACE = 5.0
 
-    def __init__(self, fifo_path: str, tmux_session: str, pid_file: str | None = None):
+    # Log a warning if queued messages haven't been injected for this long
+    QUEUE_STALL_WARN_SECS = 30.0
+
+    def __init__(
+        self,
+        fifo_path: str,
+        tmux_session: str,
+        pid_file: str | None = None,
+        transcript_path: str | None = None,
+    ):
         self.fifo_path = fifo_path
         self.tmux_session = tmux_session
         self.pid_file = pid_file  # Cleaned up on exit to signal dead instance
+        self.transcript_path = transcript_path  # For delivery verification
         self.gate = InjectionGate(tmux_session)
         self._queue: list[str] = []
         self._running = True
         self._start_time = time.monotonic()
         self._inject_failures = 0  # Consecutive injection failure count
+        self._queue_first_seen: float = 0.0  # When queue first became non-empty
+        self._stall_warned: bool = False  # Whether we've logged a stall warning
+        self._first_inject_done: bool = False  # Whether we've successfully injected once
+        # Delivery verification state
+        self._verify_pending: bool = False  # Waiting for transcript confirmation
+        self._verify_start: float = 0.0  # When verification started
+        self._pre_inject_size: int = 0  # Transcript file size before injection
+        self._pending_count: int = 0  # Number of messages pending verification
 
     def stop(self) -> None:
         self._running = False
+
+    def _transcript_size(self) -> int:
+        """Get current transcript file size, or 0 if unavailable."""
+        if not self.transcript_path:
+            return 0
+        try:
+            return Path(self.transcript_path).stat().st_size
+        except OSError:
+            return 0
+
+    def _check_transcript_for_user_message(self) -> bool:
+        """Check if a new user message appeared in transcript since injection.
+
+        Reads transcript from the pre-injection file position and looks for
+        any user message with text content (not tool_result).  A new user
+        message proves Claude's TUI received and processed our injection.
+        """
+        if not self.transcript_path:
+            return True  # No transcript → trust injection
+        path = Path(self.transcript_path)
+        if not path.exists():
+            return False
+        try:
+            current_size = path.stat().st_size
+            if current_size <= self._pre_inject_size:
+                return False
+            with open(path, "r") as f:
+                f.seek(self._pre_inject_size)
+                new_data = f.read()
+        except OSError:
+            return False
+
+        for line in new_data.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            msg = record.get("message", {})
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            # String content = direct user input
+            if isinstance(content, str) and content.strip():
+                return True
+            # List content: look for text blocks (not tool_result)
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        return True
+        return False
 
     async def run(self) -> None:
         """Main loop: read FIFO, gate, inject."""
@@ -255,16 +342,29 @@ class Injector:
             while self._running:
                 # Check tmux session still exists
                 if not _tmux_has_session(self.tmux_session):
-                    log.warning("tmux session %s gone, exiting", self.tmux_session)
+                    if self._queue:
+                        log.warning(
+                            "tmux session %s gone, dropping %d pending message(s)",
+                            self.tmux_session, len(self._queue),
+                        )
+                    else:
+                        log.warning("tmux session %s gone, exiting", self.tmux_session)
                     break
 
                 # Check if Claude has exited (skip during startup grace period)
                 if (time.monotonic() - self._start_time) >= self.STARTUP_GRACE:
                     if self.gate.is_claude_dead():
-                        log.warning(
-                            "Claude exited in session %s (shell prompt detected), exiting",
-                            self.tmux_session,
-                        )
+                        if self._queue:
+                            log.warning(
+                                "Claude exited in session %s (shell prompt detected), "
+                                "dropping %d pending message(s)",
+                                self.tmux_session, len(self._queue),
+                            )
+                        else:
+                            log.warning(
+                                "Claude exited in session %s (shell prompt detected), exiting",
+                                self.tmux_session,
+                            )
                         break
 
                 # Read from FIFO (non-blocking)
@@ -280,31 +380,119 @@ class Injector:
                 except BlockingIOError:
                     pass  # No data available
 
-                # Try to inject queued messages
-                if self._queue and self.gate.is_ready():
-                    text = "\n---\n".join(self._queue)
-                    if _inject_text(self.tmux_session, text):
+                # --- Delivery verification phase ---
+                # After injection, poll the transcript for confirmation
+                # before clearing the queue.
+                if self._verify_pending:
+                    if self._check_transcript_for_user_message():
                         log.info(
-                            "Injected %d message(s) (%d bytes) into %s",
-                            len(self._queue),
-                            len(text.encode("utf-8")),
-                            self.tmux_session,
+                            "Delivery VERIFIED for %d message(s) in %s",
+                            self._pending_count, self.tmux_session,
                         )
+                        self._verify_pending = False
+                        self._first_inject_done = True
                         self._queue.clear()
                         self._inject_failures = 0
-                    else:
+                        self._queue_first_seen = 0.0
+                        self._stall_warned = False
+                    elif (time.monotonic() - self._verify_start) > DELIVERY_VERIFY_TIMEOUT:
                         self._inject_failures += 1
+                        self._verify_pending = False
+                        log.warning(
+                            "Delivery NOT verified after %.0fs for %s "
+                            "(attempt %d/%d), will retry",
+                            DELIVERY_VERIFY_TIMEOUT,
+                            self.tmux_session,
+                            self._inject_failures,
+                            MAX_INJECT_RETRIES,
+                        )
                         if self._inject_failures >= MAX_INJECT_RETRIES:
                             log.error(
-                                "Dropping %d message(s) after %d injection "
-                                "failures in %s (total %d bytes)",
+                                "Dropping %d message(s) after %d unverified "
+                                "injections in %s",
                                 len(self._queue),
                                 self._inject_failures,
                                 self.tmux_session,
-                                len(text.encode("utf-8")),
                             )
                             self._queue.clear()
                             self._inject_failures = 0
+                            self._queue_first_seen = 0.0
+                            self._stall_warned = False
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+
+                # --- Injection phase ---
+                if self._queue:
+                    # Track how long messages have been waiting
+                    if self._queue_first_seen == 0.0:
+                        self._queue_first_seen = time.monotonic()
+                        self._stall_warned = False
+
+                    if self.gate.is_ready():
+                        # Guard against injecting before Claude's TUI is
+                        # fully initialized.  The prompt appears before the
+                        # input handler is ready; text injected during that
+                        # window is silently dropped.
+                        if not self._first_inject_done:
+                            elapsed = time.monotonic() - self._start_time
+                            if elapsed < FIRST_INJECT_SETTLE:
+                                log.debug(
+                                    "Prompt visible but waiting for TUI settle "
+                                    "(%.1fs / %.1fs) in %s",
+                                    elapsed, FIRST_INJECT_SETTLE,
+                                    self.tmux_session,
+                                )
+                                await asyncio.sleep(POLL_INTERVAL)
+                                continue
+
+                        text = "\n---\n".join(self._queue)
+                        # Snapshot transcript size BEFORE injection
+                        self._pre_inject_size = self._transcript_size()
+                        if _inject_text(self.tmux_session, text):
+                            log.info(
+                                "Injected %d message(s) (%d bytes) into %s, "
+                                "awaiting transcript verification",
+                                len(self._queue),
+                                len(text.encode("utf-8")),
+                                self.tmux_session,
+                            )
+                            if self.transcript_path:
+                                # Enter verification phase
+                                self._verify_pending = True
+                                self._verify_start = time.monotonic()
+                                self._pending_count = len(self._queue)
+                            else:
+                                # No transcript → trust injection
+                                self._first_inject_done = True
+                                self._queue.clear()
+                                self._inject_failures = 0
+                                self._queue_first_seen = 0.0
+                                self._stall_warned = False
+                        else:
+                            self._inject_failures += 1
+                            if self._inject_failures >= MAX_INJECT_RETRIES:
+                                log.error(
+                                    "Dropping %d message(s) after %d injection "
+                                    "failures in %s (total %d bytes)",
+                                    len(self._queue),
+                                    self._inject_failures,
+                                    self.tmux_session,
+                                    len(text.encode("utf-8")),
+                                )
+                                self._queue.clear()
+                                self._inject_failures = 0
+                                self._queue_first_seen = 0.0
+                                self._stall_warned = False
+                    else:
+                        # Gate not ready — log stall warning if waiting too long
+                        wait_secs = time.monotonic() - self._queue_first_seen
+                        if wait_secs >= self.QUEUE_STALL_WARN_SECS and not self._stall_warned:
+                            log.warning(
+                                "Injection queue stalled: %d message(s) waiting %.0fs "
+                                "for Claude prompt in %s (gate not ready)",
+                                len(self._queue), wait_secs, self.tmux_session,
+                            )
+                            self._stall_warned = True
 
                 await asyncio.sleep(POLL_INTERVAL)
         finally:
